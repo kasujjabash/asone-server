@@ -1,0 +1,92 @@
+# ---------------------------------------------------------------------------
+# Secrets — never commit these
+# ---------------------------------------------------------------------------
+# Real credentials live here. .env.example is committed instead, so a new
+# collaborator knows which variables to set without ever seeing a value.
+.env
+.env.*
+!.env.example
+
+# ---------------------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+*.egg-info/
+.Python
+
+
+# ---------------------------------------------------------------------------
+# Django
+# ---------------------------------------------------------------------------
+# Postgres is the database — a stray sqlite file means something ran with the
+# wrong settings, and committing it would spread that mistake.
+*.sqlite3
+db.sqlite3
+/media/
+/staticfiles/
+local_settings.py
+
+# Migrations are NOT ignored. They are part of the source: without them a
+# collaborator cannot build the schema, and two people would invent
+# conflicting ones.
+
+# ---------------------------------------------------------------------------
+# Tests and tooling
+# ---------------------------------------------------------------------------
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+
+# ---------------------------------------------------------------------------
+# Editors and operating system
+# ---------------------------------------------------------------------------
+.DS_Store
+.idea/
+*.swp
+*~
+
+# VS Code: the shared settings are committed so everyone gets the same
+# interpreter and the same hidden clutter. Personal files are not.
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+
+# ---------------------------------------------------------------------------
+# Project documentation
+# ---------------------------------------------------------------------------
+# Documentation and reference material are held outside this repository and
+# shared directly. Ask the project lead for access.
+#
+# Two gitignore rules worth knowing, since both fail silently:
+#   - A leading slash anchors a pattern to the project root. Without it,
+#     "README.md" also matches postman/README.md and every README below.
+#   - A trailing slash means "directory only", so "README.md/" matches
+#     nothing at all.
+#   - "#" only starts a comment at the start of a line. Text after a pattern
+#     on the same line becomes part of the pattern.
+
+/docs/
+/README.md
+/ARCHITECTURE.md
+/assets/
+/postman/
+/SETUP.md
+
+# The repository is code only. Every document — the setup guide included —
+# is held on the ERA 92 side and shared directly.
+
+# ---------------------------------------------------------------------------
+# Logs and scratch
+# ---------------------------------------------------------------------------
+*.log
+scratch/
+tmp/
