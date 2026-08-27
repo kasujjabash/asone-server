@@ -17,6 +17,8 @@ from rest_framework import serializers
 from .models import (
     Garment,
     GarmentPrice,
+    Kit,
+    KitItem,
     MinimumStockLevel,
     School,
     Size,
@@ -24,7 +26,13 @@ from .models import (
     TailoringCenter,
     Warehouse,
 )
-from .services import CURRENT_PRICE_ANNOTATION, PriceNotSet, price_for
+from .services import (
+    CURRENT_PRICE_ANNOTATION,
+    EmptyKit,
+    PriceNotSet,
+    compute_kit_price,
+    price_for,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -230,6 +238,65 @@ class MinimumStockLevelSerializer(serializers.ModelSerializer):
             "warehouse_name",
             "minimum_quantity",
         )
+
+
+# ---------------------------------------------------------------------------
+# Kits
+# ---------------------------------------------------------------------------
+
+
+class KitItemSerializer(serializers.ModelSerializer):
+    kit_number = serializers.CharField(source="kit.kit_number", read_only=True)
+    sku_number = serializers.CharField(source="sku.number", read_only=True)
+    sku_description = serializers.CharField(source="sku.description", read_only=True)
+
+    class Meta:
+        model = KitItem
+        fields = (
+            "id",
+            "kit",
+            "kit_number",
+            "sku",
+            "sku_number",
+            "sku_description",
+            "quantity",
+        )
+
+
+class KitSerializer(serializers.ModelSerializer):
+    school_level_display = serializers.CharField(
+        source="get_school_level_display", read_only=True
+    )
+    current_price = serializers.SerializerMethodField()
+    item_count = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model = Kit
+        fields = (
+            "id",
+            "kit_number",
+            "name",
+            "school_level",
+            "school_level_display",
+            "is_active",
+            "current_price",
+            "item_count",
+        )
+
+    def get_current_price(self, obj) -> str | None:
+        """Today's kit price, or null where it cannot be priced.
+
+        Null rather than a failed request: one kit with a pricing gap — an
+        unpriced component, or no components at all — should not stop the
+        rest of a kit list from loading, the same way an unpriced garment
+        does not stop the garment list from loading (see GarmentSerializer).
+        compute_kit_price() itself still raises for any caller that needs to
+        know not just that the total is missing, but why.
+        """
+        try:
+            return str(compute_kit_price(obj))
+        except (PriceNotSet, EmptyKit):
+            return None
 
 
 # ---------------------------------------------------------------------------

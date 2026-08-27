@@ -22,6 +22,9 @@ router.register("minimum-stock-levels", views.MinimumStockLevelViewSet, "minimum
 # generate a route named "price-list" for the *table*, colliding with the
 # PS/HS price-list endpoint below, which is a different thing entirely.
 router.register("prices", views.GarmentPriceViewSet, "garment-price")
+# Kits
+router.register("kits", views.KitViewSet, "kit")
+router.register("kit-items", views.KitItemViewSet, "kit-item")
 
 urlpatterns = [
     path("price-lists/", views.PriceListView.as_view(), name="price-list"),
