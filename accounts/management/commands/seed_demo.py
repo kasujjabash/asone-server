@@ -13,8 +13,11 @@ from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 
+from datetime import date
+from decimal import Decimal
+
 from accounts.models import User
-from catalog.models import School, TailoringCenter, Warehouse
+from catalog.models import Garment, GarmentPrice, MinimumStockLevel, School, Size, Sku, TailoringCenter, Warehouse
 
 #: Known password, printed to the terminal. This is exactly why the command
 #: refuses to run outside DEBUG.
@@ -34,6 +37,23 @@ SCHOOLS = [
     ("Serere Primary School", School.Level.PRIMARY, "Serere"),
     ("Serere High School", School.Level.HIGH, "Serere"),
 ]
+
+SIZES = [("8", 8), ("10", 10), ("12", 12), ("14", 14), ("16", 16)]
+
+# name, school level, colour, unit price in UGX
+GARMENTS = [
+    ("White Shirt", Garment.SchoolLevel.BOTH, "White", "25000.00"),
+    ("Grey Trousers", Garment.SchoolLevel.HIGH, "Grey", "35000.00"),
+    ("Blue Tunic", Garment.SchoolLevel.PRIMARY, "Blue", "30000.00"),
+    ("Navy Skirt", Garment.SchoolLevel.HIGH, "Navy", "32000.00"),
+    ("Grey Shorts", Garment.SchoolLevel.PRIMARY, "Grey", "22000.00"),
+    ("Jumper", Garment.SchoolLevel.BOTH, "Maroon", "45000.00"),
+    ("Socks", Garment.SchoolLevel.BOTH, "White", "5000.00"),
+]
+
+#: Prices run from the start of the 2026 school year so that "price today"
+#: resolves. The 2027 season is what AsOne is actually planning for.
+PRICES_ACTIVE_FROM = date(2026, 1, 1)
 
 # email, first name, last name, role, warehouse, school
 DEMO_USERS = [
@@ -100,6 +120,7 @@ class Command(BaseCommand):
             key=lambda row: row[0],
         )
 
+        self._seed_catalog(warehouses)
         self._seed_users(warehouses)
 
         if options["reset_passwords"]:
@@ -119,6 +140,63 @@ class Command(BaseCommand):
             verb = self.style.SUCCESS("created") if created else "exists "
             self.stdout.write(f"  {verb}  {obj}")
         return made
+
+    def _seed_catalog(self, warehouses):
+        """Garments, sizes, SKUs, prices and reorder floors.
+
+        Roughly a tenth of the real catalogue — enough to exercise the price
+        lists, both school levels, and per-warehouse minimums.
+        """
+        self.stdout.write(self.style.MIGRATE_HEADING("Sizes"))
+        sizes = {}
+        for name, order in SIZES:
+            size, created = Size.objects.get_or_create(
+                name=name, defaults={"sort_order": order}
+            )
+            sizes[name] = size
+            self.stdout.write(f"  {self.style.SUCCESS('created') if created else 'exists '}  size {name}")
+
+        self.stdout.write(self.style.MIGRATE_HEADING("Garments and prices"))
+        garments = []
+        for name, level, colour, price in GARMENTS:
+            garment, created = Garment.objects.get_or_create(
+                name=name, school_level=level, defaults={"colour": colour}
+            )
+            garments.append(garment)
+
+            # get_or_create on the price too: the exclusion constraint would
+            # refuse a second overlapping row, so re-running must not try.
+            GarmentPrice.objects.get_or_create(
+                garment=garment,
+                active_date=PRICES_ACTIVE_FROM,
+                defaults={"unit_price": Decimal(price)},
+            )
+            verb = self.style.SUCCESS("created") if created else "exists "
+            self.stdout.write(f"  {verb}  {garment} @ {price}")
+
+        self.stdout.write(self.style.MIGRATE_HEADING("SKUs"))
+        made = 0
+        for garment in garments:
+            # Socks come in fewer sizes, like the real catalogue.
+            applicable = ["10", "12"] if garment.name == "Socks" else [s[0] for s in SIZES]
+            for size_name in applicable:
+                sku, created = Sku.objects.get_or_create(
+                    garment=garment, size=sizes[size_name]
+                )
+                made += created
+        self.stdout.write(f"  {Sku.objects.count()} SKUs ({made} new this run)")
+
+        self.stdout.write(self.style.MIGRATE_HEADING("Minimum stock levels"))
+        floors = 0
+        for sku in Sku.objects.all():
+            for warehouse_name, quantity in (("Namayemba", 120), ("Serere", 60)):
+                _, created = MinimumStockLevel.objects.get_or_create(
+                    sku=sku,
+                    warehouse=warehouses[warehouse_name],
+                    defaults={"minimum_quantity": quantity},
+                )
+                floors += created
+        self.stdout.write(f"  {MinimumStockLevel.objects.count()} floors ({floors} new this run)")
 
     def _seed_users(self, warehouses):
         self.stdout.write(self.style.MIGRATE_HEADING("Users"))

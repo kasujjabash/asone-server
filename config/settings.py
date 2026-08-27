@@ -42,6 +42,9 @@ INSTALLED_APPS = [
     "django.contrib.sessions",
     "django.contrib.messages",
     "django.contrib.staticfiles",
+    # Provides ExclusionConstraint and the range field types, which catalog
+    # uses to make two prices for the same garment on the same day impossible.
+    "django.contrib.postgres",
     # third party
     "rest_framework",
     "django_filters",
@@ -166,6 +169,9 @@ REST_FRAMEWORK = {
     ),
     "DEFAULT_FILTER_BACKENDS": ("django_filters.rest_framework.DjangoFilterBackend",),
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
+    # Model-level rules raise Django's ValidationError, which DRF would
+    # otherwise let escape as a 500. See config/exceptions.py.
+    "EXCEPTION_HANDLER": "config.exceptions.exception_handler",
     "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
     "PAGE_SIZE": 50,
     # Throttling is scoped rather than global: ordinary API traffic from a busy

@@ -7,6 +7,7 @@ urls.py and this file just mounts it.
     /admin/       Django admin, used by Central Office for master data
     /api/         a directory of what the API offers
     /api/auth/    authentication (accounts app)
+    /api/catalog/ master data (catalog app)
     /api/schema/  the OpenAPI document
     /api/docs/    interactive API documentation
 """
@@ -34,6 +35,7 @@ urlpatterns = [
     path("admin/", admin.site.urls),
     path("api/", ApiRootView.as_view(), name="api-root"),
     path("api/auth/", include("accounts.urls")),
+    path("api/catalog/", include("catalog.urls")),
     path("api/schema/", SpectacularAPIView.as_view(), name="schema"),
     path(
         "api/docs/",

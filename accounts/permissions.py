@@ -1,41 +1,4 @@
-"""Role and site access control.
-
-Single source of truth: the access matrix on p.9 of the 14 August pack
-("As One Logistics -TC Uniforms 2026-08-14.pdf"), cross-checked against the
-"Role Access" sheet of AsOne_Logistics_System_Checklist.xlsx.
-
-That matrix is a grid of roles down the side and *functions* across the top.
-The capability classes below are named after those columns, one class per
-column, so when AsOne changes a cell the change here is one line:
-
-                        | Table    | Production | Warehouse  | Inventory | School   | Backorder | Financial
-                        | Updates  | Orders     | Recv/Ship  | Adj       | Orders   | Transfers | Reports
-    --------------------+----------+------------+------------+-----------+----------+-----------+-----------
-    Program Lead        | All      | All        | All        |     -     |    -     | All       | All
-    Operations Manager  | All      | All        | All        |     -     |    -     | All       | All
-    Warehouse Staff     |   -      |     -      | Assigned   |     -     |    -     | Assigned* |  -
-    School Staff        |   -      |     -      |     -      |     -     | Assigned |    -      |  -
-    Finance Department  |   -      |     -      |     -      | All       |    -     |    -      | All
-
-    All      = every site        Assigned = own warehouse / own schools
-    -        = no access
-
-    * The Warehouse Staff / Backorder Transfers cell is blank in AsOne's
-      printed matrix. It is granted here on Jim's 24 August direction, which
-      supersedes it. See docs/CLIENT_DECISIONS.md D5.
-
-Two separate questions are answered in this module, and they must not be
-confused with each other:
-
-    *What* may this user do?   -> the permission classes
-    *Which rows* may they see? -> scope_to_user_site()
-
-A permission class lets a warehouse clerk open the receiving screen. Only
-scope_to_user_site() stops that clerk seeing the other warehouse's receipts.
-Every list endpoint needs both.
-"""
-
-from rest_framework.permissions import BasePermission, IsAuthenticated
+from rest_framework.permissions import SAFE_METHODS, BasePermission, IsAuthenticated
 
 from .models import User
 
@@ -235,6 +198,40 @@ class PasswordChangeNotPending(BasePermission):
 #: bare ``IsAuthenticated``, so a new view cannot forget the pending-password
 #: check and quietly become reachable on a shared password.
 AUTHENTICATED = [IsAuthenticated, PasswordChangeNotPending]
+
+
+class MasterDataAccess(BasePermission):
+    """Editing master data is the "Table Updates" column. Reading is not.
+
+    AsOne's matrix gives editing to the leads alone, but grants *view only* on
+    individual tables to other roles — and not the same roles for every table:
+
+        SKUs        view: Warehouse Staff, School Staff, Finance
+        Prices      view: School Staff, Finance
+        Min levels  view: Warehouse Staff
+        Warehouses  view: Warehouse Staff
+
+    So a single "leads write, everyone reads" class would be wrong five
+    different ways. Each viewset declares its own read audience instead::
+
+        class SkuViewSet(ModelViewSet):
+            permission_classes = [IsAuthenticated, MasterDataAccess]
+            read_roles = (Role.WAREHOUSE_STAFF, Role.SCHOOL_STAFF, Role.FINANCE)
+
+    A viewset that declares no `read_roles` is readable by leads only, which
+    is the safe default: forgetting the attribute narrows access rather than
+    opening it.
+    """
+
+    message = "Your role does not have access to this master data."
+
+    def has_permission(self, request, view) -> bool:
+        if request.method in SAFE_METHODS:
+            audience = ALL_SITE_ROLES | frozenset(getattr(view, "read_roles", ()))
+            return has_role(request.user, *audience)
+
+        # Writes are the Table Updates column, whatever the table.
+        return has_role(request.user, *CanUpdateTables.roles)
 
 
 # ---------------------------------------------------------------------------

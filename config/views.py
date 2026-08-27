@@ -38,7 +38,22 @@ class ApiRootView(APIView):
                         reverse("accounts:password-change")
                     ),
                 },
+                "master_data": {
+                    "garments": request.build_absolute_uri(reverse("catalog:garment-list")),
+                    "skus": request.build_absolute_uri(reverse("catalog:sku-list")),
+                    "prices": request.build_absolute_uri(reverse("catalog:garment-price-list")),
+                    "price_lists": request.build_absolute_uri(reverse("catalog:price-list")),
+                    "sizes": request.build_absolute_uri(reverse("catalog:size-list")),
+                    "minimum_stock_levels": request.build_absolute_uri(
+                        reverse("catalog:minimum-stock-level-list")
+                    ),
+                    "tailoring_centers": request.build_absolute_uri(
+                        reverse("catalog:tailoring-center-list")
+                    ),
+                    "warehouses": request.build_absolute_uri(reverse("catalog:warehouse-list")),
+                    "schools": request.build_absolute_uri(reverse("catalog:school-list")),
+                },
                 # Filled in as each app gains an API.
-                "not_yet_built": ["catalog", "inventory", "procurement", "orders"],
+                "not_yet_built": ["inventory", "procurement", "orders"],
             }
         )
