@@ -239,6 +239,15 @@ class GarmentPriceViewSet(viewsets.ModelViewSet):
     read_roles = (Role.SCHOOL_STAFF, Role.FINANCE)
     filterset_fields = ("garment",)
 
+    # No DELETE. The promise that a March invoice reprints at March's price
+    # depends entirely on that price row still existing — deleting one
+    # silently rewrites history, and nothing in the database prevents it
+    # (no other model points at GarmentPrice).
+    #
+    # A row entered by mistake is corrected with PATCH, so nothing is lost by
+    # removing the verb.
+    http_method_names = ["get", "post", "patch", "put", "head", "options"]
+
 
 @extend_schema(
     tags=["Master data — pricing"],
@@ -312,6 +321,12 @@ class SkuViewSet(viewsets.ModelViewSet):
     read_roles = (Role.WAREHOUSE_STAFF, Role.SCHOOL_STAFF, Role.FINANCE)
     filterset_fields = ("garment", "size", "is_active", "garment__school_level")
     search_fields = ("number", "description")
+
+    # No DELETE. The control number is issued the moment a SKU is created and
+    # is printed on pick lists and packing lists; deleting the row destroys
+    # the record of what that number meant, while the sequence never hands it
+    # out again. Retire a SKU with `is_active` instead.
+    http_method_names = ["get", "post", "patch", "put", "head", "options"]
 
     def get_queryset(self):
         # A SKU's price is its garment's price, so the subquery correlates on

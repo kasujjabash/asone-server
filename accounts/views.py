@@ -258,6 +258,12 @@ class UserViewSet(viewsets.ModelViewSet):
     permission_classes = [*AUTHENTICATED, CanUpdateTables]
     queryset = User.objects.select_related("warehouse", "school").order_by("email")
     filterset_fields = ["role", "is_active", "warehouse", "school"]
+
+    # No DELETE. Accounts are deactivated, never removed: the sign-in audit
+    # trail points at them, and every stock movement will once the ledger
+    # exists. Only LoginAttempt protects a user today, so without this an
+    # account that had never signed in could be erased.
+    http_method_names = ["get", "post", "patch", "put", "head", "options"]
     http_method_names = ["get", "post", "patch", "head", "options"]
 
     def get_serializer_class(self):

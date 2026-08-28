@@ -55,6 +55,7 @@ INSTALLED_APPS = [
     "accounts",
     "catalog",
     "inventory",
+    "procurement",
 ]
 
 AUTH_USER_MODEL = "accounts.User"

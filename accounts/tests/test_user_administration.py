@@ -365,3 +365,37 @@ class LoginAuditTests(APITestCase):
 
         response = self.client.get(reverse("accounts:login-attempt-list"))
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+
+class AccountsAreDeactivatedNotDeleted(APITestCase):
+    """Accounts carry history, so the verb is removed rather than guarded.
+
+    Only LoginAttempt protects a user today. Without this, an account that
+    had never signed in could be erased — and once the stock ledger exists,
+    every movement will point at one.
+    """
+
+    def setUp(self):
+        self.sites = build_sites()
+        self.lead = make_user("sharon", User.Role.PROGRAM_LEAD)
+        self.clerk = make_user(
+            "julius", User.Role.WAREHOUSE_STAFF, warehouse=self.sites["namayemba"]
+        )
+        self.client.force_authenticate(self.lead)
+
+    def test_a_user_cannot_be_deleted(self):
+        response = self.client.delete(
+            reverse("accounts:user-detail", args=[self.clerk.pk])
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+        self.assertTrue(User.objects.filter(pk=self.clerk.pk).exists())
+
+    def test_deactivating_is_the_path_instead(self):
+        response = self.client.post(
+            reverse("accounts:user-deactivate", args=[self.clerk.pk])
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.clerk.refresh_from_db()
+        self.assertFalse(self.clerk.is_active)
