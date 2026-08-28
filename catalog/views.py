@@ -32,6 +32,8 @@ from . import services
 from .models import (
     Garment,
     GarmentPrice,
+    Kit,
+    KitItem,
     MinimumStockLevel,
     School,
     Size,
@@ -42,6 +44,8 @@ from .models import (
 from .serializers import (
     GarmentPriceSerializer,
     GarmentSerializer,
+    KitItemSerializer,
+    KitSerializer,
     MinimumStockLevelSerializer,
     PriceListRowSerializer,
     RepriceSerializer,
@@ -333,3 +337,43 @@ class MinimumStockLevelViewSet(viewsets.ModelViewSet):
     permission_classes = MASTER_DATA
     read_roles = (Role.WAREHOUSE_STAFF,)
     filterset_fields = ("warehouse", "sku")
+
+
+# ---------------------------------------------------------------------------
+# Kits
+# ---------------------------------------------------------------------------
+
+
+@extend_schema(tags=["Master data — kits"])
+class KitViewSet(viewsets.ModelViewSet):
+    """Bundles of SKUs sold as one unit, e.g. a new-student starter kit.
+
+    `current_price` is computed fresh on every read — see
+    catalog.services.compute_kit_price(). Unlike Garment, there is no
+    `reprice` action here: a kit has no price of its own to change, only
+    components whose prices already have that endpoint.
+    """
+
+    serializer_class = KitSerializer
+    permission_classes = MASTER_DATA
+    read_roles = (Role.SCHOOL_STAFF, Role.FINANCE)
+    filterset_fields = ("school_level", "is_active")
+    search_fields = ("kit_number", "name")
+
+    def get_queryset(self):
+        # Annotated rather than counted per row, same reasoning as
+        # GarmentViewSet.get_queryset — one query instead of one per kit.
+        return Kit.objects.annotate(item_count=Count("items")).order_by(
+            "school_level", "name"
+        )
+
+
+@extend_schema(tags=["Master data — kits"])
+class KitItemViewSet(viewsets.ModelViewSet):
+    """One line of a kit's bill of materials: a component SKU and its quantity."""
+
+    queryset = KitItem.objects.select_related("kit", "sku").order_by("kit", "sku")
+    serializer_class = KitItemSerializer
+    permission_classes = MASTER_DATA
+    read_roles = (Role.SCHOOL_STAFF, Role.FINANCE)
+    filterset_fields = ("kit", "sku")

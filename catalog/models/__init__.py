@@ -7,11 +7,13 @@ mean scrolling past the site tables.
     products.py  Garment, Size
     skus.py      Sku, MinimumStockLevel
     pricing.py   time-effective garment prices
+    kits.py      Uniform Kits and their bill of materials
 
 Everything is re-exported here, so the rest of the project imports from
 `catalog.models` and never has to know which file a model lives in.
 """
 
+from .kits import Kit, KitItem
 from .pricing import GarmentPrice
 from .products import Garment, Size
 from .sites import School, TailoringCenter, Warehouse
@@ -20,6 +22,8 @@ from .skus import MinimumStockLevel, Sku
 __all__ = [
     "Garment",
     "GarmentPrice",
+    "Kit",
+    "KitItem",
     "MinimumStockLevel",
     "School",
     "Size",
