@@ -11,14 +11,27 @@ cannot each invent their own slightly different arithmetic.
 
 from decimal import Decimal
 
+from decimal import Decimal
+
 from django.db import connection, transaction
+from django.utils import timezone
 from django.db.models import DecimalField, F, IntegerField, Sum, Value
 from django.db.models.functions import Coalesce
 
-from .models import StockMovement, StockStatus
+from .models import (
+    MovementType,
+    StockMovement,
+    StockStatus,
+    WarehouseTransfer,
+    WarehouseTransferLine,
+)
 
 #: Created by the initial migration. AsOne's "Transaction #".
 MOVEMENT_SEQUENCE = "inventory_movement_seq"
+#: Money always sums as a decimal — quantity is an integer and unit_value a
+#: decimal, and Django will not guess what their product should be.
+MONEY = DecimalField(max_digits=18, decimal_places=2)
+TRANSFER_SEQUENCE = "inventory_transfer_seq"
 
 
 def next_movement_number() -> str:
@@ -31,6 +44,13 @@ def next_movement_number() -> str:
     with connection.cursor() as cursor:
         cursor.execute("SELECT nextval(%s)", [MOVEMENT_SEQUENCE])
         return f"TX-{cursor.fetchone()[0]}"
+
+
+def next_transfer_number() -> str:
+    """The next warehouse transfer number. Same sequence guarantees as above."""
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT nextval(%s)", [TRANSFER_SEQUENCE])
+        return f"WT-{cursor.fetchone()[0]}"
 
 
 # ---------------------------------------------------------------------------
@@ -189,3 +209,174 @@ def movements_for_sku(sku, warehouse=None):
     if warehouse is not None:
         queryset = queryset.filter(warehouse=warehouse)
     return queryset.order_by("-occurred_on", "-id")
+
+
+# ---------------------------------------------------------------------------
+# Warehouse transfers — F25
+# ---------------------------------------------------------------------------
+
+
+class TransferAlreadyPosted(Exception):
+    """Posting twice would move the stock twice."""
+
+
+class NotEnoughStock(Exception):
+    """The source warehouse does not hold what the transfer is trying to move.
+
+    Refused rather than allowed to go negative. Negative stock is not a
+    number anyone can act on — it means either the count is wrong or the
+    ledger is, and posting a transfer on top would bury which.
+    """
+
+    def __init__(self, shortfalls):
+        self.shortfalls = shortfalls
+        listed = ", ".join(
+            f"{s['sku'].number} (moving {s['requested']}, only {s['available']} on hand)"
+            for s in shortfalls
+        )
+        super().__init__(f"Not enough stock at the source warehouse: {listed}.")
+
+
+def average_unit_value(sku, warehouse, as_of=None):
+    """What one unit of ``sku`` at ``warehouse`` is currently carried at.
+
+    Total value divided by units on hand, taken from the ledger. Used to
+    value a transfer so the same figure leaves one warehouse and arrives at
+    the other — which is what makes "no money moves" (p.6) true rather than
+    merely intended.
+
+    Returns None when nothing is on hand; there is no value to carry across,
+    and the transfer will be refused for lack of stock anyway.
+    """
+    row = _ledger(warehouse=warehouse, sku=sku, as_of=as_of).aggregate(
+        level=Coalesce(Sum("quantity"), Value(0), output_field=IntegerField()),
+        value=Coalesce(
+            Sum(F("quantity") * F("unit_value"), output_field=MONEY),
+            Value(Decimal("0.00")),
+            output_field=MONEY,
+        ),
+    )
+
+    if not row["level"]:
+        return None
+    return (row["value"] / row["level"]).quantize(Decimal("0.01"))
+
+
+@transaction.atomic
+def create_transfer(*, from_warehouse, to_warehouse, lines, created_by, **fields):
+    """Prepare a transfer without moving anything.
+
+    Entering and posting are separate, as with receipts: a transfer can be
+    written down, checked against what is actually on the shelf, and only
+    then committed.
+
+    Stock is checked here as well as at posting. Catching it now tells
+    someone before they load a van; the check at posting is what actually
+    guarantees it, because stock can move in between.
+    """
+    lines = list(lines)
+    if not lines:
+        raise ValueError("A transfer needs at least one line.")
+
+    _refuse_if_short(from_warehouse, lines)
+
+    transfer = WarehouseTransfer(
+        from_warehouse=from_warehouse,
+        to_warehouse=to_warehouse,
+        created_by=created_by,
+        **fields,
+    )
+    transfer.full_clean(exclude=["number", "created_by"])
+    transfer.save()
+
+    WarehouseTransferLine.objects.bulk_create(
+        [
+            WarehouseTransferLine(
+                transfer=transfer, sku=line["sku"], quantity=line["quantity"]
+            )
+            for line in lines
+        ]
+    )
+    return transfer
+
+
+def _refuse_if_short(warehouse, lines, as_of=None):
+    """Check every line against what the source actually holds."""
+    shortfalls = []
+    for line in lines:
+        sku = line["sku"] if isinstance(line, dict) else line.sku
+        wanted = line["quantity"] if isinstance(line, dict) else line.quantity
+
+        available = stock_level(sku, warehouse, as_of=as_of)
+        if wanted > available:
+            shortfalls.append(
+                {"sku": sku, "requested": wanted, "available": available}
+            )
+
+    if shortfalls:
+        raise NotEnoughStock(shortfalls)
+
+
+@transaction.atomic
+def post_transfer(transfer, *, posted_by):
+    """Commit a transfer: two ledger rows per line, out and in.
+
+    Atomic, and it has to be. A transfer half-posted would take stock out of
+    one warehouse without putting it into the other — the goods would simply
+    cease to exist, and no later count could say where they went.
+
+    Both rows carry the same unit value, taken from what the stock was
+    already carried at. Total inventory value across the two warehouses is
+    unchanged, which is what p.6 means by "no money moves".
+
+    Stock is re-checked here even though create_transfer checked it: time
+    passes between writing a transfer down and committing it, and something
+    else may have moved the stock.
+    """
+    if transfer.is_posted:
+        raise TransferAlreadyPosted(
+            f"{transfer.number} was already posted on {transfer.posted_at:%Y-%m-%d}."
+        )
+
+    lines = list(transfer.lines.select_related("sku"))
+    _refuse_if_short(transfer.from_warehouse, lines, as_of=transfer.transfer_date)
+
+    movements = []
+    for line in lines:
+        unit_value = average_unit_value(
+            line.sku, transfer.from_warehouse, as_of=transfer.transfer_date
+        )
+
+        common = {
+            "sku": line.sku,
+            "unit_value": unit_value,
+            "document_number": transfer.number,
+            "occurred_on": transfer.transfer_date,
+            "created_by": posted_by,
+            "source": transfer.from_warehouse.name,
+            "destination": transfer.to_warehouse.name,
+        }
+        movements.append(
+            post_movement(
+                warehouse=transfer.from_warehouse,
+                quantity=-line.quantity,
+                movement_type=MovementType.TRANSFER_OUT,
+                **common,
+            )
+        )
+        movements.append(
+            post_movement(
+                warehouse=transfer.to_warehouse,
+                quantity=line.quantity,
+                movement_type=MovementType.TRANSFER_IN,
+                **common,
+            )
+        )
+
+        line.unit_value = unit_value
+        line.save(update_fields=["unit_value"])
+
+    transfer.posted_at = timezone.now()
+    transfer.save(update_fields=["posted_at"])
+
+    return movements

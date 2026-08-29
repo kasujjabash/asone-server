@@ -12,7 +12,9 @@ and nothing else, per AsOne's matrix.
 from datetime import date
 
 from drf_spectacular.utils import OpenApiParameter, extend_schema
-from rest_framework import viewsets
+from django.db.models import Prefetch
+from rest_framework import status, viewsets
+from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError as DRFValidationError
 from rest_framework.generics import get_object_or_404
 from rest_framework.response import Response
@@ -21,6 +23,7 @@ from rest_framework.views import APIView
 from accounts.models import User
 from accounts.permissions import (
     AUTHENTICATED,
+    CanMoveStockBetweenWarehouses,
     CanReceiveAndShip,
     MasterDataAccess,
     scope_to_user_site,
@@ -28,9 +31,11 @@ from accounts.permissions import (
 from catalog.models import Warehouse
 
 from . import services
-from .models import ReasonCode, StockMovement
+from .models import ReasonCode, StockMovement, WarehouseTransfer, WarehouseTransferLine
 from .serializers import (
     ReasonCodeSerializer,
+    WarehouseTransferSerializer,
+    WarehouseTransferWriteSerializer,
     ReorderAlertSerializer,
     StockLevelSerializer,
     StockMovementSerializer,
@@ -176,3 +181,113 @@ class ReasonCodeViewSet(viewsets.ModelViewSet):
     filterset_fields = ("is_active",)
     search_fields = ("code", "name")
     http_method_names = ["get", "post", "patch", "head", "options"]
+
+
+# ---------------------------------------------------------------------------
+# Warehouse transfers — F25
+# ---------------------------------------------------------------------------
+
+
+@extend_schema(tags=["Inventory"])
+class WarehouseTransferViewSet(viewsets.ModelViewSet):
+    """Stock moving between the two warehouses — F25.
+
+    Unlike the other inventory adjustments, F25 gives this to **both leads
+    and Finance**, not Finance alone. A rebalance between warehouses is an
+    operational decision that happens to have no financial effect, so the
+    matrix widens the cell here — worth noticing, because every neighbouring
+    feature is Finance-only.
+
+    Warehouse staff have no access at all: a transfer commits two sites, and
+    a clerk can only see one of them.
+
+    Not the same as a **backorder transfer**, which is Phase 3: there a
+    warehouse ships direct to a school without the goods ever reaching the
+    school's own warehouse (decision D2).
+    """
+
+    permission_classes = [*AUTHENTICATED, CanMoveStockBetweenWarehouses]
+    filterset_fields = ("from_warehouse", "to_warehouse", "posted_at")
+    # Never deleted: an unposted transfer still records that someone intended
+    # to move stock, and a posted one is the source of ledger rows.
+    http_method_names = ["get", "post", "patch", "head", "options"]
+
+    def get_queryset(self):
+        return WarehouseTransfer.objects.select_related(
+            "from_warehouse", "to_warehouse", "reason_code", "created_by"
+        ).prefetch_related(
+            Prefetch(
+                "lines",
+                queryset=WarehouseTransferLine.objects.select_related("sku"),
+            )
+        )
+
+    def get_serializer_class(self):
+        if self.action == "create":
+            return WarehouseTransferWriteSerializer
+        return WarehouseTransferSerializer
+
+    @extend_schema(
+        summary="Prepare a transfer",
+        request=WarehouseTransferWriteSerializer,
+        responses={201: WarehouseTransferSerializer},
+        description=(
+            "Writes the transfer down. **Does not move stock** — posting does "
+            "that, as a separate step, so a transfer can be checked against "
+            "what is actually on the shelf first.\n\n"
+            "Refused if the source warehouse does not hold what is being "
+            "moved. Stock is checked again at posting, because it can move in "
+            "between."
+        ),
+    )
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        data = dict(serializer.validated_data)
+        lines = data.pop("lines")
+
+        try:
+            transfer = services.create_transfer(
+                created_by=request.user,
+                from_warehouse=data.pop("from_warehouse"),
+                to_warehouse=data.pop("to_warehouse"),
+                lines=lines,
+                **data,
+            )
+        except services.NotEnoughStock as exc:
+            raise DRFValidationError({"lines": str(exc)}) from exc
+
+        return Response(
+            WarehouseTransferSerializer(transfer).data, status=status.HTTP_201_CREATED
+        )
+
+    @extend_schema(
+        summary="Post a transfer to the ledger",
+        request=None,
+        responses={200: WarehouseTransferSerializer},
+        description=(
+            "Writes **two** permanent ledger rows per line: one out of the "
+            "source, one into the destination, at the same unit value.\n\n"
+            "Total inventory value across the two warehouses is unchanged — "
+            "AsOne owns the stock either side, so a transfer changes where it "
+            "is, not what it is worth.\n\n"
+            "Atomic: a half-posted transfer would take stock out of one "
+            "warehouse without putting it in the other, and the goods would "
+            "simply cease to exist.\n\n"
+            "Can only be done once."
+        ),
+    )
+    @action(detail=True, methods=["post"], url_path="post-to-ledger")
+    def post_to_ledger(self, request, pk=None):
+        transfer = self.get_object()
+
+        try:
+            services.post_transfer(transfer, posted_by=request.user)
+        except services.TransferAlreadyPosted as exc:
+            raise DRFValidationError({"detail": str(exc)}) from exc
+        except services.NotEnoughStock as exc:
+            raise DRFValidationError({"lines": str(exc)}) from exc
+
+        transfer.refresh_from_db()
+        return Response(WarehouseTransferSerializer(transfer).data)

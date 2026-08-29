@@ -2,7 +2,7 @@
 
 from django.contrib import admin
 
-from .models import ReasonCode, StockMovement
+from .models import ReasonCode, StockMovement, WarehouseTransfer, WarehouseTransferLine
 
 
 @admin.register(StockMovement)
@@ -47,4 +47,37 @@ class ReasonCodeAdmin(admin.ModelAdmin):
 
     def has_delete_permission(self, request, obj=None):
         """Retire with `is_active` instead — past adjustments point at these."""
+        return False
+
+
+class WarehouseTransferLineInline(admin.TabularInline):
+    model = WarehouseTransferLine
+    extra = 0
+    fields = ("sku", "quantity", "unit_value")
+    readonly_fields = ("unit_value",)
+
+
+@admin.register(WarehouseTransfer)
+class WarehouseTransferAdmin(admin.ModelAdmin):
+    """Stock rebalanced between the two warehouses — F25.
+
+    Posting is deliberately not offered here. It writes two permanent ledger
+    rows and re-checks stock, so it goes through the API where those failures
+    can be reported properly.
+    """
+
+    list_display = ("number", "transfer_date", "from_warehouse", "to_warehouse", "is_posted")
+    list_filter = ("from_warehouse", "to_warehouse", "transfer_date")
+    search_fields = ("number", "notes")
+    date_hierarchy = "transfer_date"
+    readonly_fields = ("number", "posted_at", "created_by", "created_at")
+    inlines = [WarehouseTransferLineInline]
+
+    @admin.display(boolean=True, description="Posted")
+    def is_posted(self, obj):
+        return obj.is_posted
+
+    def has_delete_permission(self, request, obj=None):
+        """A posted transfer is the source of ledger rows; an unposted one
+        still records that somebody intended to move stock."""
         return False

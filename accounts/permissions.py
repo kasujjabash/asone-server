@@ -156,6 +156,27 @@ class CanTransferBackorders(_RolePermission):
     roles = ALL_SITE_ROLES | {Role.WAREHOUSE_STAFF}
 
 
+class CanMoveStockBetweenWarehouses(_RolePermission):
+    """Feature F25 — rebalancing stock between Namayemba and Serere.
+
+    **Not** the "Inventory Adj" column, and **not** "Backorder Transfers",
+    though it sits between them and is easy to confuse with either:
+
+      Inventory Adj (Finance only)   corrections, returns, damages
+      F25 (leads and Finance)        stock moving between warehouses
+      Backorder Transfers (+ WH)     Phase 3: a warehouse fills another's
+                                     backorder and ships DIRECT to the school
+
+    The checklist gives F25 to Program Lead, Operations Manager and Finance —
+    wider than the Inventory Adj column it would otherwise fall under, and
+    narrower than Backorder Transfers, which decision D5 extended to warehouse
+    staff. Warehouse staff are excluded here because a transfer commits two
+    sites and a clerk can only see one of them.
+    """
+
+    roles = ALL_SITE_ROLES | {Role.FINANCE}
+
+
 class CanViewFinancialReports(_RolePermission):
     """Matrix column: "Financial Reports".
 

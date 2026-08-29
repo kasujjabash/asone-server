@@ -10,6 +10,7 @@ app_name = "inventory"
 router = DefaultRouter()
 router.register("movements", views.StockMovementViewSet, "movement")
 router.register("reason-codes", views.ReasonCodeViewSet, "reason-code")
+router.register("transfers", views.WarehouseTransferViewSet, "transfer")
 
 urlpatterns = [
     path("stock-levels/", views.StockLevelView.as_view(), name="stock-levels"),

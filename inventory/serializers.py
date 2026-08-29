@@ -5,9 +5,10 @@ being posted, later an adjustment — never by a client sending a movement.
 """
 
 from config.validators import CaseInsensitiveUniqueValidator
+from catalog.models import Sku
 from rest_framework import serializers
 
-from .models import ReasonCode, StockMovement
+from .models import ReasonCode, StockMovement, WarehouseTransfer, WarehouseTransferLine
 
 
 class StockMovementSerializer(serializers.ModelSerializer):
@@ -104,3 +105,96 @@ class ReasonCodeSerializer(serializers.ModelSerializer):
     class Meta:
         model = ReasonCode
         fields = ("id", "code", "name", "description", "is_active")
+
+
+# ---------------------------------------------------------------------------
+# Warehouse transfers — F25
+# ---------------------------------------------------------------------------
+
+
+class WarehouseTransferLineSerializer(serializers.ModelSerializer):
+    sku_number = serializers.CharField(source="sku.number", read_only=True)
+    sku_description = serializers.CharField(source="sku.description", read_only=True)
+
+    class Meta:
+        model = WarehouseTransferLine
+        fields = ("id", "sku", "sku_number", "sku_description", "quantity", "unit_value")
+        read_only_fields = ("id", "unit_value")
+
+
+class WarehouseTransferLineInputSerializer(serializers.Serializer):
+    sku = serializers.PrimaryKeyRelatedField(queryset=Sku.objects.all())
+    quantity = serializers.IntegerField(min_value=1)
+
+
+class WarehouseTransferSerializer(serializers.ModelSerializer):
+    lines = WarehouseTransferLineSerializer(many=True, read_only=True)
+    from_warehouse_name = serializers.CharField(source="from_warehouse.name", read_only=True)
+    to_warehouse_name = serializers.CharField(source="to_warehouse.name", read_only=True)
+    reason_code_name = serializers.CharField(
+        source="reason_code.name", read_only=True, default=None
+    )
+    created_by_name = serializers.CharField(source="created_by.get_full_name", read_only=True)
+    is_posted = serializers.BooleanField(read_only=True)
+
+    class Meta:
+        model = WarehouseTransfer
+        fields = (
+            "id",
+            "number",
+            "from_warehouse",
+            "from_warehouse_name",
+            "to_warehouse",
+            "to_warehouse_name",
+            "transfer_date",
+            "reason_code",
+            "reason_code_name",
+            "notes",
+            "posted_at",
+            "is_posted",
+            "created_by",
+            "created_by_name",
+            "created_at",
+            "lines",
+        )
+        read_only_fields = ("id", "number", "posted_at", "created_by", "created_at")
+
+
+class WarehouseTransferWriteSerializer(serializers.ModelSerializer):
+    """Preparing a transfer. Does not move stock — posting does that."""
+
+    lines = WarehouseTransferLineInputSerializer(many=True, write_only=True)
+
+    class Meta:
+        model = WarehouseTransfer
+        fields = (
+            "from_warehouse",
+            "to_warehouse",
+            "transfer_date",
+            "reason_code",
+            "notes",
+            "lines",
+        )
+
+    def validate(self, attrs):
+        if attrs["from_warehouse"] == attrs["to_warehouse"]:
+            raise serializers.ValidationError(
+                {"to_warehouse": "A transfer must be between two different warehouses."}
+            )
+        return attrs
+
+    def validate_lines(self, value):
+        if not value:
+            raise serializers.ValidationError("A transfer needs at least one line.")
+
+        seen = set()
+        repeated = {
+            line["sku"].number
+            for line in value
+            if line["sku"].pk in seen or seen.add(line["sku"].pk)
+        }
+        if repeated:
+            raise serializers.ValidationError(
+                f"Each SKU may appear once. Repeated: {', '.join(sorted(repeated))}."
+            )
+        return value

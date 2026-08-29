@@ -28,6 +28,7 @@ locations are in scope is open question Q9, so there is no field for it yet.
 """
 
 from django.core.exceptions import ValidationError
+from django.core.validators import MinValueValidator
 from django.db import models
 from django.db.models.functions import Lower
 
@@ -234,3 +235,126 @@ class ReasonCode(models.Model):
 
     def __str__(self):
         return f"{self.code} — {self.name}"
+
+
+class WarehouseTransfer(models.Model):
+    """Stock moving between the two warehouses — F25.
+
+    **No money moves** (p.6). AsOne owns the stock either side, so a transfer
+    changes where it is, not what it is worth. Posting writes two ledger rows
+    per line at the same unit value: one out of the source, one into the
+    destination. Total inventory value is identical before and after.
+
+    Not to be confused with a **backorder transfer**, which is Phase 3 and a
+    different thing entirely: there, a warehouse holding stock takes over
+    another warehouse's backorder and ships **direct to the school** (decision
+    D2). Goods never pass through the school's own warehouse. That is an
+    outbound shipment, not this.
+
+    Entering and posting are separate, as with receipts: a transfer can be
+    prepared, checked, then committed.
+    """
+
+    number = models.CharField(
+        max_length=16,
+        unique=True,
+        editable=False,
+        help_text="System assigned. Unique forever, never reused.",
+    )
+
+    from_warehouse = models.ForeignKey(
+        "catalog.Warehouse", on_delete=models.PROTECT, related_name="transfers_out"
+    )
+    to_warehouse = models.ForeignKey(
+        "catalog.Warehouse", on_delete=models.PROTECT, related_name="transfers_in"
+    )
+
+    transfer_date = models.DateField(help_text="The date the stock actually moved.")
+
+    # Optional: the reason codes table (F13) covers "Warehouse transfer", but a
+    # transfer is a movement in its own right rather than an adjustment, so a
+    # code is a note about *why* rather than what kind of movement this is.
+    reason_code = models.ForeignKey(
+        "inventory.ReasonCode",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="transfers",
+        help_text="Optional. Why this rebalancing was needed.",
+    )
+    notes = models.TextField(blank=True)
+
+    posted_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When this transfer was posted to the ledger. Blank means not yet posted.",
+    )
+    created_by = models.ForeignKey(
+        "accounts.User", on_delete=models.PROTECT, related_name="+"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-transfer_date", "-number"]
+        constraints = [
+            # Stock cannot move to where it already is. Allowing it would post
+            # a matching pair of rows that cancel out — noise in the audit
+            # trail implying something happened when nothing did.
+            models.CheckConstraint(
+                condition=~models.Q(from_warehouse=models.F("to_warehouse")),
+                name="transfer_between_different_warehouses",
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.number}: {self.from_warehouse} -> {self.to_warehouse}"
+
+    @property
+    def is_posted(self) -> bool:
+        return self.posted_at is not None
+
+    def clean(self):
+        super().clean()
+        if self.from_warehouse_id and self.from_warehouse_id == self.to_warehouse_id:
+            raise ValidationError(
+                {"to_warehouse": "A transfer must be between two different warehouses."}
+            )
+
+    def save(self, *args, **kwargs):
+        if not self.number:
+            from inventory.services import next_transfer_number
+
+            self.number = next_transfer_number()
+        super().save(*args, **kwargs)
+
+
+class WarehouseTransferLine(models.Model):
+    """One SKU on a transfer, and how many of it move."""
+
+    transfer = models.ForeignKey(
+        WarehouseTransfer, on_delete=models.CASCADE, related_name="lines"
+    )
+    sku = models.ForeignKey("catalog.Sku", on_delete=models.PROTECT, related_name="+")
+    quantity = models.PositiveIntegerField(validators=[MinValueValidator(1)])
+
+    # Snapshotted when the transfer is posted, from the value the stock
+    # already carried at the source. Both ledger rows use it, which is what
+    # makes "no money moves" true rather than merely intended.
+    unit_value = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        help_text="Set when the transfer is posted, from the value at the source warehouse.",
+    )
+
+    class Meta:
+        ordering = ["sku__description"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["transfer", "sku"], name="unique_sku_per_transfer"
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.quantity} x {self.sku.number}"
