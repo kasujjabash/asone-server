@@ -17,7 +17,7 @@ from accounts.models import User
 from accounts.tests.factories import build_sites, make_user
 from catalog.models import TailoringCenter
 from catalog.services import PriceNotSet, reprice
-from procurement.models import GroupOrder, ProductionOrder
+from procurement.models import GroupOrder
 from procurement.models.base import OrderStatus
 from procurement.services import (
     OrderHasNoLines,

@@ -3,7 +3,7 @@
 from datetime import date
 from decimal import Decimal
 
-from catalog.models import Garment, GarmentPrice
+from catalog.models import Garment, GarmentPrice, Kit, KitItem
 
 # The 2027 season. Uniforms are made Sept–Dec 2026 and drawn down through 2027.
 SEASON_START = date(2027, 1, 1)
@@ -21,3 +21,11 @@ def make_price(garment, amount="25000.00", active_from=SEASON_START, expires=Non
         active_date=active_from,
         expiration_date=expires,
     )
+
+
+def make_kit(kit_number="PS-STARTER-01", name="PS Starter Kit", level=Kit.SchoolLevel.PRIMARY, **extra):
+    return Kit.objects.create(kit_number=kit_number, name=name, school_level=level, **extra)
+
+
+def make_kit_item(kit, sku, quantity=1):
+    return KitItem.objects.create(kit=kit, sku=sku, quantity=quantity)

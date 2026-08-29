@@ -19,9 +19,21 @@ from datetime import date
 
 from django.db import connection, transaction
 
-from catalog.services import PriceNotSet, price_for
+from catalog.services import price_for
 
-from .models import GroupOrder, GroupOrderLine, ProductionOrder, ProductionOrderLine
+from django.utils import timezone
+
+from inventory.models import MovementType, StockStatus
+from inventory.services import post_movement
+
+from .models import (
+    GroupOrder,
+    GroupOrderLine,
+    ProductionOrder,
+    ProductionOrderLine,
+    Receipt,
+    ReceiptLine,
+)
 from .models.base import OrderStatus
 
 #: Created by the initial migration. Numbers are prefixed so a document is
@@ -29,6 +41,7 @@ from .models.base import OrderStatus
 #: tell a group order from a production order without looking it up.
 GROUP_ORDER_SEQUENCE = "procurement_group_order_seq"
 PRODUCTION_ORDER_SEQUENCE = "procurement_production_order_seq"
+RECEIPT_SEQUENCE = "procurement_receipt_seq"
 
 
 class OrderHasNoLines(Exception):
@@ -58,6 +71,10 @@ def next_group_order_number() -> str:
 
 def next_production_order_number() -> str:
     return _next_number(PRODUCTION_ORDER_SEQUENCE, "PO-")
+
+
+def next_receipt_number() -> str:
+    return _next_number(RECEIPT_SEQUENCE, "RC-")
 
 
 # ---------------------------------------------------------------------------
@@ -182,3 +199,148 @@ def open_production_orders(queryset=None):
     """
     queryset = queryset if queryset is not None else ProductionOrder.objects.all()
     return queryset.filter(status=OrderStatus.OPEN)
+
+
+# ---------------------------------------------------------------------------
+# Receipts — F19, F20, F21
+# ---------------------------------------------------------------------------
+
+
+class ReceiptAlreadyPosted(Exception):
+    """Posting twice would double the stock.
+
+    A receipt is posted once. If the count was wrong, the correction is an
+    inventory adjustment against the ledger, not a second posting — the
+    ledger is append-only, so there is no way to "re-post" over the first.
+    """
+
+
+class NotOnTheOrder(Exception):
+    """A receipt line names a SKU the production order never asked for.
+
+    Refused rather than accepted quietly. A TC shipping something nobody
+    ordered is a real event, but it needs a person to decide what to do — it
+    is not something a warehouse clerk should be able to absorb into stock by
+    keying it in.
+    """
+
+    def __init__(self, skus):
+        self.skus = skus
+        listed = ", ".join(sorted(sku.number for sku in skus))
+        super().__init__(
+            f"These SKUs are not on the production order: {listed}."
+        )
+
+
+@transaction.atomic
+def create_receipt(*, production_order, lines, created_by, **fields):
+    """Record what arrived, without touching stock.
+
+    Entering and posting are deliberately separate steps. AsOne's flow has
+    the warehouse *check the delivery against the TC's handwritten packing
+    list and resolve differences* before anything is committed — so a receipt
+    can be keyed in, compared, corrected, and only then posted.
+
+    ``lines`` is an iterable of dicts with ``sku`` and ``quantity_received``,
+    optionally ``quantity_on_packing_list`` and ``discrepancy_note``.
+    """
+    lines = list(lines)
+    if not lines:
+        raise OrderHasNoLines("A receipt needs at least one line.")
+
+    # The order line price is what AsOne agreed to pay this TC. Snapshotted
+    # onto each receipt line so the document records what the goods are
+    # worth, and the ledger and Finance's report both read the same figure.
+    order_prices = {
+        line.sku_id: line.unit_price for line in production_order.lines.all()
+    }
+    unexpected = [line["sku"] for line in lines if line["sku"].pk not in order_prices]
+    if unexpected:
+        raise NotOnTheOrder(unexpected)
+
+    receipt = Receipt(production_order=production_order, created_by=created_by, **fields)
+    receipt.full_clean(exclude=["number", "created_by", "production_order"])
+    receipt.save()
+
+    ReceiptLine.objects.bulk_create(
+        [
+            ReceiptLine(
+                receipt=receipt,
+                sku=line["sku"],
+                quantity_received=line["quantity_received"],
+                quantity_on_packing_list=line.get("quantity_on_packing_list"),
+                discrepancy_note=line.get("discrepancy_note", ""),
+                unit_value=order_prices[line["sku"].pk],
+            )
+            for line in lines
+        ]
+    )
+    return receipt
+
+
+@transaction.atomic
+def post_receipt(receipt, *, posted_by):
+    """Commit a receipt to the ledger — F21.
+
+    Writes one permanent movement per line and stamps the receipt as posted.
+    Atomic: a receipt that is half in the ledger would overstate some SKUs
+    and understate others, and no later count could tell which.
+
+    Each movement is valued at **the price on the production order line**,
+    not today's price list. AsOne buys from the TCs at an agreed figure; the
+    stock is worth what was paid for it.
+
+    Returns the movements written.
+    """
+    if receipt.is_posted:
+        raise ReceiptAlreadyPosted(
+            f"{receipt.number} was already posted on {receipt.posted_at:%Y-%m-%d}."
+        )
+
+    order = receipt.production_order
+
+    movements = [
+        post_movement(
+            warehouse=order.warehouse,
+            sku=line.sku,
+            quantity=line.quantity_received,
+            movement_type=MovementType.RECEIPT,
+            stock_status=StockStatus.AVAILABLE,
+            unit_value=line.unit_value,
+            document_number=receipt.number,
+            occurred_on=receipt.date_received,
+            created_by=posted_by,
+            source=order.tailoring_center.name,
+            destination=order.warehouse.name,
+        )
+        for line in receipt.lines.select_related("sku")
+    ]
+
+    receipt.posted_at = timezone.now()
+    receipt.save(update_fields=["posted_at"])
+
+    return movements
+
+
+def outstanding_on_order(production_order):
+    """What is still to come on an order: ordered minus received.
+
+    Counts posted receipts only. An unposted receipt is paperwork someone is
+    still checking, not goods the warehouse can rely on.
+    """
+    received = defaultdict(int)
+    for line in ReceiptLine.objects.filter(
+        receipt__production_order=production_order,
+        receipt__posted_at__isnull=False,
+    ).select_related("sku"):
+        received[line.sku_id] += line.quantity_received
+
+    return [
+        {
+            "sku": line.sku,
+            "ordered": line.quantity,
+            "received": received.get(line.sku_id, 0),
+            "outstanding": line.quantity - received.get(line.sku_id, 0),
+        }
+        for line in production_order.lines.select_related("sku")
+    ]

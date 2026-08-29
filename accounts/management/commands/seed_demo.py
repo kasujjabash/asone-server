@@ -18,6 +18,7 @@ from decimal import Decimal
 
 from accounts.models import User
 from catalog.models import Garment, GarmentPrice, MinimumStockLevel, School, Size, Sku, TailoringCenter, Warehouse
+from inventory.models import ReasonCode
 
 #: Known password, printed to the terminal. This is exactly why the command
 #: refuses to run outside DEBUG.
@@ -54,6 +55,16 @@ GARMENTS = [
 #: Prices run from the start of the 2026 school year so that "price today"
 #: resolves. The 2027 season is what AsOne is actually planning for.
 PRICES_ACTIVE_FROM = date(2026, 1, 1)
+
+#: The four AsOne named on p.3, followed by "May be more…" — so this is a
+#: starting set for Central Office to extend, not the definitive list.
+REASON_CODES = [
+    ("RET", "Return", "Uniform returned by a school, back into sellable stock."),
+    ("XFER", "Warehouse transfer", "Stock moved between Namayemba and Serere."),
+    ("LOSS", "Pick up or loss", "Stock gone missing, or collected without an order."),
+    ("DMG", "Damaged", "Damaged in transit or in the warehouse, no longer sellable."),
+    ("CORR", "Inventory correction", "Physical count differs from the system."),
+]
 
 # email, first name, last name, role, warehouse, school
 DEMO_USERS = [
@@ -121,6 +132,7 @@ class Command(BaseCommand):
         )
 
         self._seed_catalog(warehouses)
+        self._seed_reason_codes()
         self._seed_users(warehouses)
 
         if options["reset_passwords"]:
@@ -197,6 +209,20 @@ class Command(BaseCommand):
                 )
                 floors += created
         self.stdout.write(f"  {MinimumStockLevel.objects.count()} floors ({floors} new this run)")
+
+    def _seed_reason_codes(self):
+        """Why an inventory adjustment was made — F13.
+
+        Seeded because Phase 2 adjustments will need them, and Central Office
+        can start from AsOne's four rather than a blank table.
+        """
+        self.stdout.write(self.style.MIGRATE_HEADING("Inventory adjustment reason codes"))
+        for code, name, description in REASON_CODES:
+            _, created = ReasonCode.objects.get_or_create(
+                code=code, defaults={"name": name, "description": description}
+            )
+            verb = self.style.SUCCESS("created") if created else "exists "
+            self.stdout.write(f"  {verb}  {code:5} {name}")
 
     def _seed_users(self, warehouses):
         self.stdout.write(self.style.MIGRATE_HEADING("Users"))

@@ -215,7 +215,7 @@ class MasterDataAccess(BasePermission):
     different ways. Each viewset declares its own read audience instead::
 
         class SkuViewSet(ModelViewSet):
-            permission_classes = [IsAuthenticated, MasterDataAccess]
+            permission_classes = [*AUTHENTICATED, MasterDataAccess]
             read_roles = (Role.WAREHOUSE_STAFF, Role.SCHOOL_STAFF, Role.FINANCE)
 
     A viewset that declares no `read_roles` is readable by leads only, which

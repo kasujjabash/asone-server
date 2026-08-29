@@ -11,6 +11,7 @@ Only the first two live here. The SKU is F06 and lands separately.
 """
 
 from django.db import models
+from django.db.models.functions import Lower
 
 
 class Garment(models.Model):
@@ -60,8 +61,11 @@ class Garment(models.Model):
             # "White Shirt" for Primary and "White Shirt" for High School are
             # two garments — they can carry different prices. The same name at
             # the same level is a duplicate.
+            # Case-insensitive on the name: "White Shirt" and "white shirt"
+            # at the same level are one garment, and letting both exist would
+            # split its price and its SKUs in two.
             models.UniqueConstraint(
-                fields=["name", "school_level"], name="unique_garment_per_level"
+                Lower("name"), "school_level", name="unique_garment_per_level"
             )
         ]
 
@@ -83,13 +87,21 @@ class Size(models.Model):
     price lists read better in size order.
     """
 
-    name = models.CharField(max_length=20, unique=True, help_text='For example "10" or "S".')
+    name = models.CharField(max_length=20, help_text='For example "10" or "S".')
     sort_order = models.PositiveSmallIntegerField(
         default=0, help_text="Smallest first. Ties fall back to name."
     )
 
     class Meta:
         ordering = ["sort_order", "name"]
+        constraints = [
+            models.UniqueConstraint(Lower("name"), name="unique_size_name"),
+        ]
 
     def __str__(self):
         return self.name
+
+
+#: Distinct from SCHOOL_LEVEL_CHOICES: a garment may be marked BOTH, because
+#: it appears on either price list. A school and a kit cannot be "both".
+GARMENT_SCHOOL_LEVEL_CHOICES = Garment.SchoolLevel.choices

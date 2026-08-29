@@ -1,6 +1,7 @@
 """Where AsOne makes, holds and sells uniforms."""
 
 from django.db import models
+from django.db.models.functions import Lower
 
 
 class TailoringCenter(models.Model):
@@ -11,8 +12,18 @@ class TailoringCenter(models.Model):
     so production orders and receipts have something to point at.
     """
 
-    name = models.CharField(max_length=120, unique=True)
+    name = models.CharField(max_length=120)
     address = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ["name"]
+        constraints = [
+            # Case-insensitive. A plain `unique=True` is case-SENSITIVE in
+            # Postgres, so "Idudi" and "idudi" would be two Tailoring Centers
+            # — and production orders would silently split between them.
+            # This has already happened once with warehouses.
+            models.UniqueConstraint(Lower("name"), name="unique_tailoring_center_name"),
+        ]
 
     def __str__(self):
         return self.name
@@ -24,7 +35,7 @@ class Warehouse(models.Model):
     Namayemba also hosts AsOne's central office.
     """
 
-    name = models.CharField(max_length=120, unique=True)
+    name = models.CharField(max_length=120)
     address = models.TextField(blank=True)
 
     # "Warehouses have a primary TC but can order on any TC" (p.4), so this is
@@ -33,6 +44,16 @@ class Warehouse(models.Model):
     primary_tailoring_center = models.ForeignKey(
         TailoringCenter, null=True, blank=True, on_delete=models.PROTECT
     )
+
+    class Meta:
+        ordering = ["name"]
+        constraints = [
+            # See TailoringCenter. "Namayemba" and "Namayemba warehouse" are
+            # a different problem this cannot solve — but "Namayemba" and
+            # "namayemba" it can, and stock split across two spellings of one
+            # warehouse is unrecoverable without a manual merge.
+            models.UniqueConstraint(Lower("name"), name="unique_warehouse_name"),
+        ]
 
     def __str__(self):
         return self.name
@@ -56,7 +77,7 @@ class School(models.Model):
         PRIMARY = "PS", "Primary School"
         HIGH = "HS", "High School"
 
-    name = models.CharField(max_length=120, unique=True)
+    name = models.CharField(max_length=120)
     level = models.CharField(max_length=2, choices=Level.choices)
     address = models.TextField(blank=True)
 
@@ -70,5 +91,19 @@ class School(models.Model):
         Warehouse, on_delete=models.PROTECT, related_name="schools"
     )
 
+    class Meta:
+        ordering = ["name"]
+        constraints = [
+            # "Namayemba Primary School" and "Namayemba primary school" both
+            # existed in the development database until this was added.
+            models.UniqueConstraint(Lower("name"), name="unique_school_name"),
+        ]
+
     def __str__(self):
         return f"{self.name} ({self.get_level_display()})"
+
+
+#: Referenced by SPECTACULAR_SETTINGS["ENUM_NAME_OVERRIDES"] so the generated
+#: API client gets a readable type name. Kit.SchoolLevel has the same two
+#: values and deliberately shares this name — one enum, one meaning.
+SCHOOL_LEVEL_CHOICES = School.Level.choices

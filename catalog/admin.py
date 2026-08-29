@@ -11,6 +11,8 @@ from django.contrib import admin
 from .models import (
     Garment,
     GarmentPrice,
+    Kit,
+    KitItem,
     MinimumStockLevel,
     School,
     Size,
@@ -18,7 +20,7 @@ from .models import (
     TailoringCenter,
     Warehouse,
 )
-from .services import PriceNotSet, price_for
+from .services import EmptyKit, PriceNotSet, compute_kit_price, price_for
 
 
 @admin.register(TailoringCenter)
@@ -137,3 +139,41 @@ class MinimumStockLevelAdmin(admin.ModelAdmin):
     search_fields = ("sku__number", "sku__description")
     list_editable = ("minimum_quantity",)
     autocomplete_fields = ("sku",)
+
+
+class KitItemInline(admin.TabularInline):
+    """The kit's bill of materials, shown on the kit it belongs to.
+
+    Deliberately an inline, same reasoning as GarmentPriceInline: a line item
+    is meaningless apart from the kit it belongs to, and seeing the whole
+    bill of materials together is what stops someone adding a duplicate line
+    for a SKU that is already on it.
+    """
+
+    model = KitItem
+    extra = 0
+    fields = ("sku", "quantity")
+    autocomplete_fields = ("sku",)
+
+
+@admin.register(Kit)
+class KitAdmin(admin.ModelAdmin):
+    """Uniform Kits — bundles of SKUs sold as one unit."""
+
+    list_display = ("kit_number", "name", "school_level", "current_price", "is_active")
+    list_filter = ("school_level", "is_active")
+    search_fields = ("kit_number", "name")
+    inlines = [KitItemInline]
+
+    @admin.display(description="Price today")
+    def current_price(self, obj):
+        """Today's kit price, or a visible gap.
+
+        Mirrors GarmentAdmin.current_price: a kit that cannot be priced
+        cannot be sold, so that is worth seeing at a glance in the list
+        rather than discovering it later.
+        """
+        try:
+            return compute_kit_price(obj)
+        except (PriceNotSet, EmptyKit):
+            return "— not priced —"

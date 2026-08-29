@@ -14,6 +14,7 @@ value instead of a list and a judgement call.
 """
 
 from datetime import date
+from decimal import Decimal
 
 from django.db import connection
 from django.db.models import OuterRef, Q, Subquery
@@ -218,7 +219,7 @@ def next_sku_number() -> str:
     trade: gaps in the numbering are harmless, collisions are not.
     """
     with connection.cursor() as cursor:
-        cursor.execute(f"SELECT nextval(%s)", [SKU_NUMBER_SEQUENCE])
+        cursor.execute("SELECT nextval(%s)", [SKU_NUMBER_SEQUENCE])
         return str(cursor.fetchone()[0])
 
 
@@ -229,3 +230,102 @@ def price_for_sku(sku, on_date=None):
     Raises PriceNotSet if the garment is unpriced on that date.
     """
     return price_for(sku.garment, on_date)
+
+
+# ---------------------------------------------------------------------------
+# Kit pricing
+# ---------------------------------------------------------------------------
+
+
+class EmptyKit(Exception):
+    """A kit has no component SKUs, so it cannot be priced.
+
+    Raised rather than treating an empty kit as free. A kit with no line
+    items yet is far more likely to be a bill of materials nobody finished
+    setting up than a genuine zero-cost bundle, and pricing it at 0 would
+    hide that gap instead of surfacing it — the same reasoning PriceNotSet
+    already applies to a single unpriced garment.
+    """
+
+    def __init__(self, kit):
+        self.kit = kit
+        super().__init__(f"{kit} has no component SKUs and cannot be priced.")
+
+
+def compute_kit_price(kit, on_date=None):
+    """The kit's price on ``on_date`` (default today).
+
+    Always the live sum of what each component SKU costs on that date,
+    multiplied by how many of it the kit contains — never a stored figure.
+    See the Kit model's docstring for why: a stored total would go stale the
+    moment any component's garment was repriced, silently, with nobody the
+    wiser until an invoice was wrong.
+
+    Dated rather than "current price only", for the same reason price_for()
+    takes a date: the system must be able to answer "what did this kit cost
+    as of a given date", because an invoice raised in March must still cost
+    out at March's prices if it is reprinted in September.
+
+    Raises PriceNotSet, propagated unchanged from price_for_sku(), the
+    moment any single component has no price covering ``on_date``. A kit
+    missing one component's price refuses to price itself entirely, rather
+    than quietly returning a total that is short by that component's value.
+
+    Raises EmptyKit if the kit has no component SKUs at all.
+    """
+    on_date = on_date or date.today()
+
+    items = list(kit.items.select_related("sku__garment"))
+    if not items:
+        raise EmptyKit(kit)
+
+    total = Decimal("0.00")
+    for item in items:
+        total += price_for_sku(item.sku, on_date) * item.quantity
+    return total
+
+
+def kit_prices(kits, on_date=None) -> dict:
+    """Price a whole list of kits in one query. Returns ``{kit_id: total}``.
+
+    `compute_kit_price()` is correct but costs one query per component, so a
+    list of kits costs kits x components. This does the same arithmetic from
+    a single annotated pass over their line items.
+
+    **Deliberately not a database SUM.** `Sum()` skips NULLs, so a kit with
+    one unpriced component would come back with a total quietly short by that
+    component's value — exactly the failure the whole design exists to
+    prevent. Summed in Python instead, where a missing price makes the whole
+    kit unpriceable.
+
+    A kit that cannot be priced maps to ``None``: either a component has no
+    price on that date, or the kit has no components at all. Callers that
+    need to know *which* should use `compute_kit_price()`, which says so.
+    """
+    from decimal import Decimal
+
+    from .models import KitItem
+
+    kits = list(kits)
+    if not kits:
+        return {}
+
+    on_date = on_date or date.today()
+    items = with_current_price(
+        KitItem.objects.filter(kit_id__in=[kit.pk for kit in kits]),
+        on_date,
+        garment_field="sku__garment_id",
+    )
+
+    totals, unpriceable = {}, set()
+    for item in items:
+        amount = getattr(item, CURRENT_PRICE_ANNOTATION)
+        if amount is None:
+            unpriceable.add(item.kit_id)
+            continue
+        totals[item.kit_id] = totals.get(item.kit_id, Decimal("0.00")) + amount * item.quantity
+
+    return {
+        kit.pk: None if kit.pk in unpriceable else totals.get(kit.pk)
+        for kit in kits
+    }

@@ -213,6 +213,24 @@ SPECTACULAR_SETTINGS = {
     "DESCRIPTION": "Pricing, stock and order system of record for AsOne Logistics.",
     "VERSION": "0.1.0",
     "SERVE_INCLUDE_SCHEMA": False,
+    # Three different things are called a "school level" and they are NOT the
+    # same set of values:
+    #
+    #   School.Level         PS, HS          which school this is
+    #   Garment.SchoolLevel  PS, HS, BOTH    which price list a garment is on
+    #   Kit.SchoolLevel      PS, HS          which school a kit is for
+    #
+    # Left alone, the generator invents names like "SchoolLevel101Enum" and
+    # gives two of them the same name, so a client generated from this schema
+    # would carry a type nobody can read. Named explicitly instead.
+    # School.Level and Kit.SchoolLevel are the SAME two values (PS, HS), so
+    # they share one name — two names for one set is an error, not a nicety.
+    # Garment's set is genuinely different: it also allows BOTH, because a
+    # garment can appear on either price list where a school or a kit cannot.
+    "ENUM_NAME_OVERRIDES": {
+        "SchoolLevelEnum": "catalog.models.sites.SCHOOL_LEVEL_CHOICES",
+        "GarmentSchoolLevelEnum": "catalog.models.products.GARMENT_SCHOOL_LEVEL_CHOICES",
+    },
 }
 
 

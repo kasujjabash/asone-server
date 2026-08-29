@@ -8,7 +8,8 @@ urls.py and this file just mounts it.
     /api/         a directory of what the API offers
     /api/auth/    authentication (accounts app)
     /api/catalog/ master data (catalog app)
-    /api/procurement/ group and production orders
+    /api/procurement/ group and production orders, receipts
+    /api/inventory/   the stock ledger and derived stock levels
     /api/schema/  the OpenAPI document
     /api/docs/    interactive API documentation
 """
@@ -38,6 +39,7 @@ urlpatterns = [
     path("api/auth/", include("accounts.urls")),
     path("api/catalog/", include("catalog.urls")),
     path("api/procurement/", include("procurement.urls")),
+    path("api/inventory/", include("inventory.urls")),
     path("api/schema/", SpectacularAPIView.as_view(), name="schema"),
     path(
         "api/docs/",

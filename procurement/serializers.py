@@ -11,7 +11,14 @@ from rest_framework import serializers
 from catalog.models import Sku
 from catalog.services import PriceNotSet
 
-from .models import GroupOrder, GroupOrderLine, ProductionOrder, ProductionOrderLine
+from .models import (
+    GroupOrder,
+    GroupOrderLine,
+    ProductionOrder,
+    ProductionOrderLine,
+    Receipt,
+    ReceiptLine,
+)
 from .models.base import OrderStatus
 
 
@@ -256,3 +263,171 @@ class OrderAmendSerializer(serializers.Serializer):
                 "due_in_warehouse_date, notes."
             )
         return attrs
+
+
+# ---------------------------------------------------------------------------
+# Receipts
+# ---------------------------------------------------------------------------
+
+
+class ReceiptLineSerializer(serializers.ModelSerializer):
+    """A receipt line, reading. `discrepancy` is the whole point of F20."""
+
+    sku_number = serializers.CharField(source="sku.number", read_only=True)
+    sku_description = serializers.CharField(source="sku.description", read_only=True)
+    discrepancy = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model = ReceiptLine
+        fields = (
+            "id",
+            "sku",
+            "sku_number",
+            "sku_description",
+            "quantity_received",
+            "quantity_on_packing_list",
+            "discrepancy",
+            "discrepancy_note",
+        )
+
+
+class ReceiptLineInputSerializer(serializers.Serializer):
+    """A receipt line, writing.
+
+    `quantity_on_packing_list` is optional because a handwritten packing list
+    does not always give one — and "the paper did not say" is a different
+    fact from "the paper agreed".
+    """
+
+    sku = serializers.PrimaryKeyRelatedField(queryset=Sku.objects.all())
+    quantity_received = serializers.IntegerField(min_value=1)
+    quantity_on_packing_list = serializers.IntegerField(
+        min_value=0, required=False, allow_null=True
+    )
+    discrepancy_note = serializers.CharField(
+        max_length=200, required=False, allow_blank=True
+    )
+
+
+class ReceiptSerializer(serializers.ModelSerializer):
+    """A receipt, reading."""
+
+    lines = ReceiptLineSerializer(many=True, read_only=True)
+    production_order_number = serializers.CharField(
+        source="production_order.number", read_only=True
+    )
+    warehouse_name = serializers.CharField(source="warehouse.name", read_only=True)
+    tailoring_center_name = serializers.CharField(
+        source="tailoring_center.name", read_only=True
+    )
+    created_by_name = serializers.CharField(source="created_by.get_full_name", read_only=True)
+    is_posted = serializers.BooleanField(read_only=True)
+    has_discrepancy = serializers.BooleanField(read_only=True)
+
+    class Meta:
+        model = Receipt
+        fields = (
+            "id",
+            "number",
+            "production_order",
+            "production_order_number",
+            "warehouse_name",
+            "tailoring_center_name",
+            "packing_list_number",
+            "date_received",
+            "notes",
+            "posted_at",
+            "is_posted",
+            "has_discrepancy",
+            "created_by",
+            "created_by_name",
+            "created_at",
+            "lines",
+        )
+        read_only_fields = ("id", "number", "posted_at", "created_by", "created_at")
+
+
+class ReceiptWriteSerializer(serializers.ModelSerializer):
+    """Recording what arrived. Does not touch stock — posting does that."""
+
+    lines = ReceiptLineInputSerializer(many=True, write_only=True)
+
+    class Meta:
+        model = Receipt
+        fields = (
+            "production_order",
+            "packing_list_number",
+            "date_received",
+            "notes",
+            "lines",
+        )
+
+    def validate_lines(self, value):
+        if not value:
+            raise serializers.ValidationError("A receipt needs at least one line.")
+
+        seen = set()
+        duplicates = {
+            line["sku"].number
+            for line in value
+            if line["sku"].pk in seen or seen.add(line["sku"].pk)
+        }
+        if duplicates:
+            raise serializers.ValidationError(
+                f"Each SKU may appear once. Repeated: {', '.join(sorted(duplicates))}."
+            )
+        return value
+
+
+class OutstandingRowSerializer(serializers.Serializer):
+    """One SKU on an order: ordered, received so far, still to come."""
+
+    sku_number = serializers.CharField(source="sku.number")
+    sku_description = serializers.CharField(source="sku.description")
+    ordered = serializers.IntegerField()
+    received = serializers.IntegerField()
+    outstanding = serializers.IntegerField()
+
+
+# ---------------------------------------------------------------------------
+# Costed reports — F55, F56
+# ---------------------------------------------------------------------------
+
+
+class GroupOrderCostedSerializer(serializers.Serializer):
+    """One group order on the costed report — F55."""
+
+    number = serializers.CharField()
+    order_date = serializers.DateField()
+    due_in_warehouse_date = serializers.DateField(allow_null=True)
+    status = serializers.CharField()
+    line_count = serializers.IntegerField()
+    quantity = serializers.IntegerField(help_text="Units ordered.")
+    value = serializers.DecimalField(
+        max_digits=18, decimal_places=2, help_text="At the price agreed on the day."
+    )
+
+
+class ReceiptsByTailoringCenterSerializer(serializers.Serializer):
+    """What one Tailoring Center delivered, costed — F56."""
+
+    tailoring_center_id = serializers.IntegerField()
+    tailoring_center_name = serializers.CharField()
+    receipts = serializers.IntegerField()
+    quantity = serializers.IntegerField(help_text="Units actually counted in.")
+    value = serializers.DecimalField(max_digits=18, decimal_places=2)
+
+
+class ReceiptCostedSerializer(serializers.Serializer):
+    """One receipt on the costed report, for checking a total."""
+
+    number = serializers.CharField()
+    date_received = serializers.DateField()
+    packing_list_number = serializers.CharField()
+    tailoring_center_name = serializers.CharField(
+        source="production_order.tailoring_center.name"
+    )
+    warehouse_name = serializers.CharField(source="production_order.warehouse.name")
+    production_order_number = serializers.CharField(source="production_order.number")
+    quantity = serializers.IntegerField()
+    value = serializers.DecimalField(max_digits=18, decimal_places=2)

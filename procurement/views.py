@@ -12,27 +12,45 @@ permission class lets a Namayemba clerk open the production orders screen;
 only scoping stops them reading Serere's.
 """
 
+from datetime import date
+
 from django.db.models import Prefetch
-from drf_spectacular.utils import extend_schema
+from drf_spectacular.utils import OpenApiParameter, extend_schema
+from django.shortcuts import get_object_or_404
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.exceptions import PermissionDenied
+from rest_framework.exceptions import ValidationError as DRFValidationError
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from accounts.models import User
 from accounts.permissions import (
-    CanEnterProductionOrders,
+    AUTHENTICATED,
+    CanViewFinancialReports,
+    CanReceiveAndShip,
     MasterDataAccess,
     scope_to_user_site,
 )
 
-from . import services
-from .models import GroupOrder, GroupOrderLine, ProductionOrder, ProductionOrderLine
-from .models.base import OrderStatus
+from . import reports, services
+from .models import (
+    GroupOrder,
+    GroupOrderLine,
+    ProductionOrder,
+    ProductionOrderLine,
+    Receipt,
+    ReceiptLine,
+)
 from .serializers import (
+    GroupOrderCostedSerializer,
     GroupOrderSerializer,
     OrderAmendSerializer,
+    OutstandingRowSerializer,
+    ReceiptCostedSerializer,
+    ReceiptSerializer,
+    ReceiptWriteSerializer,
+    ReceiptsByTailoringCenterSerializer,
     GroupOrderWriteSerializer,
     ProductionOrderSerializer,
     ProductionOrderWriteSerializer,
@@ -101,7 +119,7 @@ class GroupOrderViewSet(OrderViewSetMixin, viewsets.ModelViewSet):
     orders). Warehouse and school staff have no access at all.
     """
 
-    permission_classes = [IsAuthenticated, MasterDataAccess]
+    permission_classes = [*AUTHENTICATED, MasterDataAccess]
     read_roles = (Role.FINANCE,)
     filterset_fields = ("status", "order_date")
 
@@ -166,7 +184,7 @@ class ProductionOrderViewSet(OrderViewSetMixin, viewsets.ModelViewSet):
     Tailoring Center is chosen per order.
     """
 
-    permission_classes = [IsAuthenticated, MasterDataAccess]
+    permission_classes = [*AUTHENTICATED, MasterDataAccess]
     read_roles = (Role.WAREHOUSE_STAFF, Role.FINANCE)
     filterset_fields = ("status", "tailoring_center", "warehouse", "group_order")
 
@@ -224,7 +242,7 @@ class ProductionOrderViewSet(OrderViewSetMixin, viewsets.ModelViewSet):
     ),
 )
 class OpenProductionOrderView(APIView):
-    permission_classes = [IsAuthenticated, MasterDataAccess]
+    permission_classes = [*AUTHENTICATED, MasterDataAccess]
     read_roles = (Role.WAREHOUSE_STAFF, Role.FINANCE)
 
     def get(self, request):
@@ -237,3 +255,257 @@ class OpenProductionOrderView(APIView):
         )
         orders = services.open_production_orders(queryset)
         return Response(ProductionOrderSerializer(orders, many=True).data)
+
+
+# ---------------------------------------------------------------------------
+# Receipts
+# ---------------------------------------------------------------------------
+
+
+@extend_schema(tags=["Procurement — receipts"])
+class ReceiptViewSet(viewsets.ModelViewSet):
+    """F19, F20, F21 — what arrived, and what it adds to stock.
+
+    Unlike the order documents, **warehouse staff write here.** The matrix
+    gives them "Warehouse Receiving and Shipping" for their own warehouse,
+    and receiving is the one inbound step that happens at the warehouse
+    rather than at Central Office — the Tailoring Centers are not system
+    users, so a clerk keys in their handwritten packing list.
+
+    Scoped by warehouse through the production order, so a Namayemba clerk
+    cannot see or post against Serere's deliveries.
+    """
+
+    permission_classes = [*AUTHENTICATED, CanReceiveAndShip]
+    filterset_fields = ("production_order", "posted_at")
+    # Receipts are never deleted: once posted they are the source of ledger
+    # rows, and before posting they are still a record that a delivery was
+    # keyed in. An unwanted one is superseded, not erased.
+    http_method_names = ["get", "post", "patch", "head", "options"]
+
+    def get_queryset(self):
+        queryset = Receipt.objects.select_related(
+            "production_order__warehouse",
+            "production_order__tailoring_center",
+            "created_by",
+        ).prefetch_related(
+            Prefetch(
+                "lines",
+                queryset=ReceiptLine.objects.select_related("sku", "sku__garment"),
+            )
+        )
+        return scope_to_user_site(
+            queryset, self.request.user, warehouse_field="production_order__warehouse"
+        )
+
+    def get_serializer_class(self):
+        return ReceiptWriteSerializer if self.action == "create" else ReceiptSerializer
+
+    @extend_schema(
+        summary="Record a delivery",
+        request=ReceiptWriteSerializer,
+        responses={201: ReceiptSerializer},
+        description=(
+            "Records what arrived. **Does not change stock** — posting does "
+            "that, as a separate step.\n\n"
+            "The two are separate because AsOne's flow has the warehouse "
+            "check the delivery against the Tailoring Center's handwritten "
+            "packing list and resolve differences first. Send "
+            "`quantity_on_packing_list` alongside `quantity_received` and the "
+            "difference is recorded rather than argued away.\n\n"
+            "Every SKU must appear on the production order."
+        ),
+    )
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        data = dict(serializer.validated_data)
+        order = data.pop("production_order")
+        lines = data.pop("lines")
+
+        # A clerk must not be able to receive against another warehouse's
+        # order — the queryset scopes reads, this scopes writes.
+        if not scope_to_user_site(
+            ProductionOrder.objects.filter(pk=order.pk),
+            request.user,
+            warehouse_field="warehouse",
+        ).exists():
+            raise PermissionDenied("That production order is not for your warehouse.")
+
+        try:
+            receipt = services.create_receipt(
+                production_order=order, lines=lines, created_by=request.user, **data
+            )
+        except services.NotOnTheOrder as exc:
+            raise DRFValidationError({"lines": str(exc)}) from exc
+
+        return Response(
+            ReceiptSerializer(receipt).data, status=status.HTTP_201_CREATED
+        )
+
+    @extend_schema(
+        summary="Post a receipt to inventory",
+        request=None,
+        responses={200: ReceiptSerializer},
+        description=(
+            "F21 — writes one permanent ledger row per line and raises stock.\n\n"
+            "Each row is valued at the price on the production order line, "
+            "not today's price list: the stock is worth what was paid for "
+            "it.\n\n"
+            "Can only be done once. A receipt posted twice would double the "
+            "stock, and the ledger is append-only, so there is no way to take "
+            "it back — a miscount is corrected with an inventory adjustment."
+        ),
+    )
+    @action(detail=True, methods=["post"])
+    def post_to_inventory(self, request, pk=None):
+        receipt = self.get_object()
+
+        try:
+            services.post_receipt(receipt, posted_by=request.user)
+        except services.ReceiptAlreadyPosted as exc:
+            raise DRFValidationError({"detail": str(exc)}) from exc
+
+        receipt.refresh_from_db()
+        return Response(ReceiptSerializer(receipt).data)
+
+
+@extend_schema(
+    tags=["Procurement — receipts"],
+    summary="What is still to come on an order",
+    responses=OutstandingRowSerializer(many=True),
+    description=(
+        "Ordered minus received, per SKU. Counts **posted** receipts only — "
+        "an unposted receipt is paperwork somebody is still checking, not "
+        "goods the warehouse can rely on."
+    ),
+)
+class OutstandingOnOrderView(APIView):
+    permission_classes = [*AUTHENTICATED, CanReceiveAndShip]
+
+    def get(self, request, pk=None):
+        order = get_object_or_404(
+            scope_to_user_site(
+                ProductionOrder.objects.all(), request.user, warehouse_field="warehouse"
+            ),
+            pk=pk,
+        )
+        rows = services.outstanding_on_order(order)
+        return Response(OutstandingRowSerializer(rows, many=True).data)
+
+
+# ---------------------------------------------------------------------------
+# Costed reports — F55, F56
+# ---------------------------------------------------------------------------
+#
+# The "Financial Reports" column of AsOne's matrix: Program Lead, Operations
+# Manager and Finance. Warehouse and school staff are excluded — the matrix
+# says School Staff "cannot see costs beyond their own price list".
+
+
+def _period(request):
+    """Read `?from=` and `?to=`. Both ends inclusive, as a person expects
+    when they ask for September."""
+    parsed = []
+    for key in ("from", "to"):
+        raw = request.query_params.get(key)
+        if not raw:
+            parsed.append(None)
+            continue
+        try:
+            parsed.append(date.fromisoformat(raw))
+        except ValueError:
+            raise DRFValidationError(
+                {key: f"'{raw}' is not a date. Use YYYY-MM-DD."}
+            ) from None
+    return tuple(parsed)
+
+
+@extend_schema(
+    tags=["Procurement — reports"],
+    summary="Group orders, costed",
+    parameters=[
+        OpenApiParameter("from", str, description="Order date on or after, YYYY-MM-DD."),
+        OpenApiParameter("to", str, description="Order date on or before, YYYY-MM-DD."),
+        OpenApiParameter(
+            "include_cancelled", bool, description="Include withdrawn orders."
+        ),
+    ],
+    responses=GroupOrderCostedSerializer(many=True),
+    description=(
+        "F55 — what was committed to the Tailoring Centers.\n\n"
+        "Valued at the price agreed when each order was raised, not today's "
+        "price list: a September order is worth what was agreed in "
+        "September.\n\n"
+        "Cancelled orders are excluded unless asked for — money was never "
+        "committed against a withdrawn order, and counting it would overstate "
+        "the funding.\n\n"
+        "The response carries a `totals` object alongside the rows."
+    ),
+)
+class GroupOrdersCostedView(APIView):
+    permission_classes = [*AUTHENTICATED, CanViewFinancialReports]
+
+    def get(self, request):
+        date_from, date_to = _period(request)
+        include_cancelled = request.query_params.get("include_cancelled") == "true"
+
+        rows = reports.group_orders_costed(date_from, date_to, include_cancelled)
+        return Response(
+            {
+                "totals": reports.group_order_total(
+                    date_from, date_to, include_cancelled
+                ),
+                "orders": GroupOrderCostedSerializer(rows, many=True).data,
+            }
+        )
+
+
+@extend_schema(
+    tags=["Procurement — reports"],
+    summary="Receipts from Tailoring Centers, costed",
+    parameters=[
+        OpenApiParameter("from", str, description="Date received on or after."),
+        OpenApiParameter("to", str, description="Date received on or before."),
+        OpenApiParameter("tailoring_center", int, description="Limit to one TC."),
+        OpenApiParameter("warehouse", int, description="Limit to one warehouse."),
+        OpenApiParameter("detail", bool, description="Also return receipt by receipt."),
+    ],
+    responses=ReceiptsByTailoringCenterSerializer(many=True),
+    description=(
+        "F56 — what each Tailoring Center actually delivered, and what it is "
+        "worth.\n\n"
+        "Valued at what AsOne agreed to pay that TC, and counted at what "
+        "actually arrived — a short delivery is worth what came off the van, "
+        "not what the handwritten packing list claimed.\n\n"
+        "**Only posted receipts.** An unposted receipt is paperwork somebody "
+        "is still checking; it is not goods received and not money owed.\n\n"
+        "Add `?detail=true` for the individual receipts behind the totals — a "
+        "summary nobody can drill into is a number people stop trusting."
+    ),
+)
+class ReceiptsCostedView(APIView):
+    permission_classes = [*AUTHENTICATED, CanViewFinancialReports]
+
+    def get(self, request):
+        date_from, date_to = _period(request)
+        tailoring_center = request.query_params.get("tailoring_center") or None
+        warehouse = request.query_params.get("warehouse") or None
+
+        rows = reports.receipts_costed(
+            date_from, date_to, tailoring_center=tailoring_center, warehouse=warehouse
+        )
+        payload = {
+            "by_tailoring_center": ReceiptsByTailoringCenterSerializer(
+                rows, many=True
+            ).data
+        }
+
+        if request.query_params.get("detail") == "true":
+            payload["receipts"] = ReceiptCostedSerializer(
+                reports.receipt_detail_costed(date_from, date_to, tailoring_center),
+                many=True,
+            ).data
+
+        return Response(payload)

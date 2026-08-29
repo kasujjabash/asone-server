@@ -7,7 +7,6 @@ is asserted table by table below.
 """
 
 from datetime import date
-from decimal import Decimal
 
 from django.urls import reverse
 from rest_framework import status
@@ -15,9 +14,9 @@ from rest_framework.test import APITestCase
 
 from accounts.models import User
 from accounts.tests.factories import build_sites, make_user
-from catalog.models import Garment, GarmentPrice, MinimumStockLevel, Size, Sku
+from catalog.models import Garment, MinimumStockLevel, Size, Sku
 
-from .factories import SEASON_START, make_garment, make_price
+from .factories import make_garment, make_kit, make_kit_item, make_price
 
 #: The API reports "price today", so fixtures need a price covering today —
 #: not just the 2027 season the domain tests use.
@@ -35,6 +34,8 @@ READ_AUDIENCE = {
     "catalog:tailoring-center-list": {Role.WAREHOUSE_STAFF},
     "catalog:warehouse-list": {Role.WAREHOUSE_STAFF},
     "catalog:school-list": {Role.WAREHOUSE_STAFF, Role.SCHOOL_STAFF},
+    "catalog:kit-list": {Role.SCHOOL_STAFF, Role.FINANCE},
+    "catalog:kit-item-list": {Role.SCHOOL_STAFF, Role.FINANCE},
 }
 
 LEADS = {Role.PROGRAM_LEAD, Role.OPERATIONS_MANAGER}
@@ -324,3 +325,60 @@ class MinimumStockLevelApiTests(CatalogSetup):
             format="json",
         )
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+
+class KitApiTests(CatalogSetup):
+    def create_kit_as(self, role, kit_number="KIT-001"):
+        self.as_role(role)
+        return self.client.post(
+            reverse("catalog:kit-list"),
+            {"kit_number": kit_number, "name": "A kit", "school_level": "PS"},
+            format="json",
+        )
+
+    def test_leads_may_create_a_kit(self):
+        for index, role in enumerate(LEADS):
+            with self.subTest(role=role):
+                response = self.create_kit_as(role, kit_number=f"KIT-{index}")
+                self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+    def test_nobody_else_may_create_a_kit(self):
+        for role in (Role.WAREHOUSE_STAFF, Role.SCHOOL_STAFF, Role.FINANCE):
+            with self.subTest(role=role):
+                self.assertEqual(
+                    self.create_kit_as(role).status_code, status.HTTP_403_FORBIDDEN
+                )
+
+    def test_a_kit_reports_the_sum_of_its_components(self):
+        kit = make_kit()
+        make_kit_item(kit, self.sku, quantity=2)
+        self.as_role(Role.SCHOOL_STAFF)
+
+        response = self.client.get(reverse("catalog:kit-detail", args=[kit.pk]))
+
+        # self.sku's garment is priced at 25000.00 by CatalogSetup.
+        self.assertEqual(response.data["current_price"], "50000.00")
+        self.assertEqual(response.data["item_count"], 1)
+
+    def test_a_kit_missing_a_component_price_reports_null_not_an_error(self):
+        unpriced = make_garment("Unpriced Blazer")
+        size = Size.objects.create(name="14", sort_order=14)
+        unpriced_sku = Sku.objects.create(garment=unpriced, size=size)
+
+        kit = make_kit()
+        make_kit_item(kit, unpriced_sku, quantity=1)
+        self.as_role(Role.FINANCE)
+
+        response = self.client.get(reverse("catalog:kit-detail", args=[kit.pk]))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIsNone(response.data["current_price"])
+
+    def test_deleting_a_kit_over_the_api_removes_its_items(self):
+        kit = make_kit()
+        make_kit_item(kit, self.sku, quantity=1)
+        self.as_role(Role.PROGRAM_LEAD)
+
+        response = self.client.delete(reverse("catalog:kit-detail", args=[kit.pk]))
+
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)

@@ -9,7 +9,6 @@ Order matters here. The unique constraint on User.email can only be applied
 once every account has an address, which migration 0003 guarantees.
 """
 
-import django.contrib.auth.models
 from django.db import migrations, models
 
 import accounts.managers
