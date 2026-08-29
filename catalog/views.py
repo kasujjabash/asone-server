@@ -150,12 +150,17 @@ class SchoolViewSet(viewsets.ModelViewSet):
 
 @extend_schema(tags=["Master data — products"])
 class SizeViewSet(viewsets.ModelViewSet):
-    """Garment sizes, shared across garments so "10" means one thing."""
+    """Garment sizes, shared across garments so "10" means one thing.
+
+    Leads only, per F05. Other roles reach a size through the SKU that uses
+    it — `size_name` is on every SKU — so nothing is hidden from them in
+    practice, and this matches what AsOne wrote.
+    """
 
     queryset = Size.objects.all()
     serializer_class = SizeSerializer
     permission_classes = MASTER_DATA
-    read_roles = (Role.WAREHOUSE_STAFF, Role.SCHOOL_STAFF, Role.FINANCE)
+    read_roles = ()
 
 
 @extend_schema(tags=["Master data — products"])
@@ -168,7 +173,11 @@ class GarmentViewSet(viewsets.ModelViewSet):
 
     serializer_class = GarmentSerializer
     permission_classes = MASTER_DATA
-    read_roles = (Role.WAREHOUSE_STAFF, Role.SCHOOL_STAFF, Role.FINANCE)
+    # F05 gives garments to the leads alone — unlike F06, which gives SKUs to
+    # everyone as view-only. Odd on its face, since a SKU carries its
+    # garment's name, but it is what AsOne's matrix says. Worth confirming
+    # with them rather than quietly widening.
+    read_roles = ()
     filterset_fields = ("school_level", "is_active")
     search_fields = ("name", "colour")
 

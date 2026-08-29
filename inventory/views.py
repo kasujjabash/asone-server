@@ -79,7 +79,11 @@ def _warehouse(request):
     ),
 )
 class StockLevelView(APIView):
-    permission_classes = [*AUTHENTICATED, CanReceiveAndShip]
+    # F47 gives Finance "All sites" — they post the inventory adjustments and
+    # cannot do that without seeing what is on hand. CanReceiveAndShip does
+    # not include Finance, so the view declares its own read audience.
+    permission_classes = [*AUTHENTICATED, MasterDataAccess]
+    read_roles = (Role.WAREHOUSE_STAFF, Role.FINANCE)
 
     def get(self, request):
         warehouse = _warehouse(request)
@@ -114,7 +118,10 @@ class StockLevelView(APIView):
     ),
 )
 class ReorderAlertView(APIView):
-    permission_classes = [*AUTHENTICATED, CanReceiveAndShip]
+    # F50 leaves the Finance cell blank, unlike F47 next door. Reordering is
+    # an operational decision, not a financial one.
+    permission_classes = [*AUTHENTICATED, MasterDataAccess]
+    read_roles = (Role.WAREHOUSE_STAFF,)
 
     def get(self, request):
         warehouse = _warehouse(request)
@@ -135,7 +142,9 @@ class StockMovementViewSet(viewsets.ReadOnlyModelViewSet):
     """
 
     serializer_class = StockMovementSerializer
-    permission_classes = [*AUTHENTICATED, CanReceiveAndShip]
+    # F48 gives Finance "All sites" on the audit trail.
+    permission_classes = [*AUTHENTICATED, MasterDataAccess]
+    read_roles = (Role.WAREHOUSE_STAFF, Role.FINANCE)
     filterset_fields = ("sku", "warehouse", "movement_type", "document_number")
 
     def get_queryset(self):

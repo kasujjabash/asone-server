@@ -28,7 +28,11 @@ Role = User.Role
 #: and are the only ones who may write, so they are not repeated here.
 READ_AUDIENCE = {
     "catalog:sku-list": {Role.WAREHOUSE_STAFF, Role.SCHOOL_STAFF, Role.FINANCE},
-    "catalog:garment-list": {Role.WAREHOUSE_STAFF, Role.SCHOOL_STAFF, Role.FINANCE},
+    # F05 gives garments and sizes to the leads alone — deliberately narrower
+    # than F06's SKUs, which every role may view. Odd on its face, since a SKU
+    # carries its garment's name, but it is what AsOne's matrix says.
+    "catalog:garment-list": set(),
+    "catalog:size-list": set(),
     "catalog:garment-price-list": {Role.SCHOOL_STAFF, Role.FINANCE},
     "catalog:minimum-stock-level-list": {Role.WAREHOUSE_STAFF},
     "catalog:tailoring-center-list": {Role.WAREHOUSE_STAFF},
