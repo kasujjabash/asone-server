@@ -19,7 +19,9 @@ from django.db.models import DecimalField, F, IntegerField, Sum, Value
 from django.db.models.functions import Coalesce
 
 from .models import (
+    InventoryAdjustment,
     MovementType,
+    ReasonCode,
     StockMovement,
     StockStatus,
     WarehouseTransfer,
@@ -32,6 +34,7 @@ MOVEMENT_SEQUENCE = "inventory_movement_seq"
 #: decimal, and Django will not guess what their product should be.
 MONEY = DecimalField(max_digits=18, decimal_places=2)
 TRANSFER_SEQUENCE = "inventory_transfer_seq"
+ADJUSTMENT_SEQUENCE = "inventory_adjustment_seq"
 
 
 def next_movement_number() -> str:
@@ -51,6 +54,13 @@ def next_transfer_number() -> str:
     with connection.cursor() as cursor:
         cursor.execute("SELECT nextval(%s)", [TRANSFER_SEQUENCE])
         return f"WT-{cursor.fetchone()[0]}"
+
+
+def next_adjustment_number() -> str:
+    """The next inventory adjustment number. Same sequence guarantees as above."""
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT nextval(%s)", [ADJUSTMENT_SEQUENCE])
+        return f"ADJ-{cursor.fetchone()[0]}"
 
 
 # ---------------------------------------------------------------------------
@@ -380,3 +390,97 @@ def post_transfer(transfer, *, posted_by):
     transfer.save(update_fields=["posted_at"])
 
     return movements
+
+
+# ---------------------------------------------------------------------------
+# Inventory adjustments — F23
+# ---------------------------------------------------------------------------
+
+
+class AdjustmentAlreadyPosted(Exception):
+    """Posting twice would move the stock twice."""
+
+
+@transaction.atomic
+def create_adjustment(*, warehouse, sku, quantity, reason_code, created_by, adjustment_date, **fields):
+    """Prepare an inventory adjustment without touching the ledger.
+
+    Entering and posting are separate steps, same as a warehouse transfer: an
+    adjustment can be written down and checked before it actually changes
+    what the system thinks is on the shelf.
+
+    Refused up front if the SKU has no catalog price on ``adjustment_date`` —
+    `PriceNotSet` propagates rather than being caught here, so an adjustment
+    that could never be valued is never even written down. Checked again at
+    posting, because a reprice can happen in between.
+    """
+    from catalog.services import price_for_sku
+
+    price_for_sku(sku, adjustment_date)
+
+    adjustment = InventoryAdjustment(
+        warehouse=warehouse,
+        sku=sku,
+        quantity=quantity,
+        reason_code=reason_code,
+        adjustment_date=adjustment_date,
+        created_by=created_by,
+        **fields,
+    )
+    adjustment.full_clean(exclude=["number", "created_by", "unit_value"])
+    adjustment.save()
+    return adjustment
+
+
+@transaction.atomic
+def post_adjustment(adjustment, *, posted_by):
+    """Commit an adjustment: one permanent ledger row.
+
+    The reason code decides the sign. `adjustment.quantity` is always a
+    plain positive count — this is the one place it becomes the signed
+    figure the ledger stores, by reading `reason_code.direction`. The person
+    posting it is never asked to remember which way "Damaged" should move
+    the number.
+
+    Value comes from the SKU's catalog price on `adjustment_date`, looked up
+    again here rather than reused from `create_adjustment()` — a reprice can
+    happen between writing an adjustment down and posting it, and the price
+    that actually applied on the day is the one this movement should carry.
+    Unlike a transfer, this does **not** use `average_unit_value()`: an
+    adjustment is not moving stock that already has a value carried on the
+    ledger, it is correcting the count against what AsOne actually charges
+    for the item.
+
+    Raises `AdjustmentAlreadyPosted` if this has already run once, and lets
+    `catalog.services.PriceNotSet` propagate if the SKU's price was removed
+    since the adjustment was created.
+    """
+    if adjustment.is_posted:
+        raise AdjustmentAlreadyPosted(
+            f"{adjustment.number} was already posted on {adjustment.posted_at:%Y-%m-%d}."
+        )
+
+    from catalog.services import price_for_sku
+
+    unit_value = price_for_sku(adjustment.sku, adjustment.adjustment_date)
+
+    signed_quantity = adjustment.quantity
+    if adjustment.reason_code.direction == ReasonCode.AdjustmentDirection.DECREASE:
+        signed_quantity = -signed_quantity
+
+    movement = post_movement(
+        warehouse=adjustment.warehouse,
+        sku=adjustment.sku,
+        quantity=signed_quantity,
+        movement_type=MovementType.ADJUSTMENT,
+        unit_value=unit_value,
+        document_number=adjustment.number,
+        occurred_on=adjustment.adjustment_date,
+        created_by=posted_by,
+    )
+
+    adjustment.unit_value = unit_value
+    adjustment.posted_at = timezone.now()
+    adjustment.save(update_fields=["unit_value", "posted_at"])
+
+    return movement

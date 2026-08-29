@@ -9,6 +9,7 @@ adjustment kind a different financial note and marks Damages "To be
 determined" (open question Q6), so there is nothing settled to build on yet.
 """
 
+from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
 from django.test import TestCase
 from django.urls import reverse
@@ -24,21 +25,35 @@ Role = User.Role
 
 class ReasonCodeRules(TestCase):
     def setUp(self):
-        self.damaged = ReasonCode.objects.create(code="DMG", name="Damaged")
+        self.damaged = ReasonCode.objects.create(
+            code="DMG", name="Damaged", direction=ReasonCode.AdjustmentDirection.DECREASE
+        )
 
     def test_a_code_cannot_repeat(self):
         with self.assertRaises(IntegrityError), transaction.atomic():
-            ReasonCode.objects.create(code="DMG", name="Damaged in transit")
+            ReasonCode.objects.create(
+                code="DMG",
+                name="Damaged in transit",
+                direction=ReasonCode.AdjustmentDirection.DECREASE,
+            )
 
     def test_a_code_cannot_repeat_in_another_case(self):
         """"DMG" and "dmg" are the same code to everyone except the database."""
         with self.assertRaises(IntegrityError), transaction.atomic():
-            ReasonCode.objects.create(code="dmg", name="Something else")
+            ReasonCode.objects.create(
+                code="dmg",
+                name="Something else",
+                direction=ReasonCode.AdjustmentDirection.DECREASE,
+            )
 
     def test_a_name_cannot_repeat_either(self):
         """Two codes reading "Damaged" would make the picker ambiguous."""
         with self.assertRaises(IntegrityError), transaction.atomic():
-            ReasonCode.objects.create(code="DMG2", name="damaged")
+            ReasonCode.objects.create(
+                code="DMG2",
+                name="damaged",
+                direction=ReasonCode.AdjustmentDirection.DECREASE,
+            )
 
     def test_a_code_is_retired_rather_than_deleted(self):
         self.damaged.is_active = False
@@ -50,6 +65,19 @@ class ReasonCodeRules(TestCase):
 
     def test_it_reads_usefully(self):
         self.assertEqual(str(self.damaged), "DMG — Damaged")
+
+    def test_a_code_must_have_a_direction(self):
+        """F23 reads this to decide the sign of an adjustment — it cannot be
+        left blank the way description can.
+
+        Enforced by full_clean() rather than a database constraint: a plain
+        `.objects.create()` with no `direction` would silently save an empty
+        string, since CharField has no NULL to refuse — this is a case where
+        the model-level rule really is the only guard, not a backstop for a
+        database one.
+        """
+        with self.assertRaises(ValidationError):
+            ReasonCode(code="NEW", name="Something new").full_clean()
 
 
 class ReasonCodeApi(APITestCase):
@@ -72,7 +100,9 @@ class ReasonCodeApi(APITestCase):
                 "chrisis", Role.SCHOOL_STAFF, school=self.sites["school_a"]
             ),
         }
-        ReasonCode.objects.create(code="DMG", name="Damaged")
+        ReasonCode.objects.create(
+            code="DMG", name="Damaged", direction=ReasonCode.AdjustmentDirection.DECREASE
+        )
 
     def as_role(self, role):
         self.client.force_authenticate(self.users[role])
@@ -101,7 +131,12 @@ class ReasonCodeApi(APITestCase):
 
         response = self.client.post(
             reverse("inventory:reason-code-list"),
-            {"code": "SPOIL", "name": "Spoiled in storage", "description": "Water damage."},
+            {
+                "code": "SPOIL",
+                "name": "Spoiled in storage",
+                "description": "Water damage.",
+                "direction": "DECREASE",
+            },
             format="json",
         )
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
@@ -111,7 +146,7 @@ class ReasonCodeApi(APITestCase):
 
         response = self.client.post(
             reverse("inventory:reason-code-list"),
-            {"code": "SPOIL", "name": "Spoiled in storage"},
+            {"code": "SPOIL", "name": "Spoiled in storage", "direction": "DECREASE"},
             format="json",
         )
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
@@ -121,10 +156,23 @@ class ReasonCodeApi(APITestCase):
 
         response = self.client.post(
             reverse("inventory:reason-code-list"),
-            {"code": "dmg", "name": "Another damaged"},
+            {"code": "dmg", "name": "Another damaged", "direction": "DECREASE"},
             format="json",
         )
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_a_code_cannot_be_created_without_a_direction(self):
+        """F23 depends on this being set — the API must refuse it, not save
+        a code nobody can post an adjustment against correctly."""
+        self.as_role(Role.PROGRAM_LEAD)
+
+        response = self.client.post(
+            reverse("inventory:reason-code-list"),
+            {"code": "SPOIL", "name": "Spoiled in storage"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("direction", response.data)
 
     def test_a_code_cannot_be_deleted(self):
         """Past adjustments will point at it. Retire it instead."""
@@ -151,7 +199,12 @@ class ReasonCodeApi(APITestCase):
 
     def test_active_codes_can_be_filtered(self):
         """An adjustment picker should offer only the codes still in use."""
-        ReasonCode.objects.create(code="OLD", name="Retired reason", is_active=False)
+        ReasonCode.objects.create(
+            code="OLD",
+            name="Retired reason",
+            direction=ReasonCode.AdjustmentDirection.DECREASE,
+            is_active=False,
+        )
         self.as_role(Role.PROGRAM_LEAD)
 
         response = self.client.get(

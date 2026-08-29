@@ -23,16 +23,26 @@ from rest_framework.views import APIView
 from accounts.models import User
 from accounts.permissions import (
     AUTHENTICATED,
+    CanAdjustInventory,
     CanMoveStockBetweenWarehouses,
     CanReceiveAndShip,
     MasterDataAccess,
     scope_to_user_site,
 )
 from catalog.models import Warehouse
+from catalog.services import PriceNotSet
 
 from . import services
-from .models import ReasonCode, StockMovement, WarehouseTransfer, WarehouseTransferLine
+from .models import (
+    InventoryAdjustment,
+    ReasonCode,
+    StockMovement,
+    WarehouseTransfer,
+    WarehouseTransferLine,
+)
 from .serializers import (
+    InventoryAdjustmentSerializer,
+    InventoryAdjustmentWriteSerializer,
     ReasonCodeSerializer,
     WarehouseTransferSerializer,
     WarehouseTransferWriteSerializer,
@@ -291,3 +301,89 @@ class WarehouseTransferViewSet(viewsets.ModelViewSet):
 
         transfer.refresh_from_db()
         return Response(WarehouseTransferSerializer(transfer).data)
+
+
+# ---------------------------------------------------------------------------
+# Inventory adjustments — F23
+# ---------------------------------------------------------------------------
+
+
+@extend_schema(tags=["Inventory"])
+class InventoryAdjustmentViewSet(viewsets.ModelViewSet):
+    """A quantity change against a reason code — F23.
+
+    The generic shape the rest of Phase 2 reuses: physical count
+    corrections, returns and damages will all be this same document with a
+    different reason code.
+
+    Finance only, for both reading and writing — unlike most master data,
+    this is not routed through MasterDataAccess. AsOne's "Inventory Adj"
+    column is Finance-only across the board, with no read-only access for
+    anyone else, including the leads (see accounts.permissions.
+    CanAdjustInventory and open question Q3 on why even they are excluded).
+
+    Never deleted: an unposted adjustment still records that someone
+    intended a correction, and a posted one is the source of a ledger row.
+    """
+
+    permission_classes = [*AUTHENTICATED, CanAdjustInventory]
+    filterset_fields = ("warehouse", "sku", "reason_code", "posted_at")
+    http_method_names = ["get", "post", "patch", "head", "options"]
+
+    def get_queryset(self):
+        return InventoryAdjustment.objects.select_related(
+            "warehouse", "sku", "sku__garment", "reason_code", "created_by"
+        )
+
+    def get_serializer_class(self):
+        if self.action == "create":
+            return InventoryAdjustmentWriteSerializer
+        return InventoryAdjustmentSerializer
+
+    @extend_schema(
+        summary="Prepare an inventory adjustment",
+        request=InventoryAdjustmentWriteSerializer,
+        responses={201: InventoryAdjustmentSerializer},
+        description=(
+            "Writes the adjustment down. **Does not change stock** — posting "
+            "does that, as a separate step, so it can be checked first.\n\n"
+            "Refused if the SKU has no catalog price on the adjustment date."
+        ),
+    )
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        adjustment = services.create_adjustment(
+            created_by=request.user, **serializer.validated_data
+        )
+        return Response(
+            InventoryAdjustmentSerializer(adjustment).data, status=status.HTTP_201_CREATED
+        )
+
+    @extend_schema(
+        summary="Post an adjustment to the ledger",
+        request=None,
+        responses={200: InventoryAdjustmentSerializer},
+        description=(
+            "Writes **one** permanent ledger row. The reason code decides "
+            "whether the quantity increases or decreases stock — the person "
+            "posting it never chooses the sign.\n\n"
+            "Value is taken from the SKU's catalog price on the adjustment "
+            "date, looked up again in case it changed since the adjustment "
+            "was written down. Can only be done once."
+        ),
+    )
+    @action(detail=True, methods=["post"], url_path="post-to-ledger")
+    def post_to_ledger(self, request, pk=None):
+        adjustment = self.get_object()
+
+        try:
+            services.post_adjustment(adjustment, posted_by=request.user)
+        except services.AdjustmentAlreadyPosted as exc:
+            raise DRFValidationError({"detail": str(exc)}) from exc
+        except PriceNotSet as exc:
+            raise DRFValidationError({"sku": str(exc)}) from exc
+
+        adjustment.refresh_from_db()
+        return Response(InventoryAdjustmentSerializer(adjustment).data)

@@ -197,14 +197,28 @@ class ReasonCode(models.Model):
     determined" — open question Q6. Guessing now and building on the guess
     would be worse than waiting.
 
-    It also carries no movement type. Phase 2 will decide whether picking
-    "Damaged" should force the movement type, and that decision belongs with
-    the adjustment screen that has to honour it, not here.
+    It also carries no movement type. Every F23 adjustment posts as
+    MovementType.ADJUSTMENT regardless of the code chosen — the reason code
+    explains *why*, not the kind of ledger row it produces.
 
-    Used by Phase 2 adjustments. Nothing writes stock movements against a
-    reason code yet — the table exists now because it is Phase 1 master data
-    and Central Office can populate it before Phase 2 needs it.
+    Used by Phase 2 adjustments. F23 is the first thing that writes stock
+    movements against a reason code — the table existed before that as
+    Phase 1 master data, so Central Office could populate it ahead of need.
     """
+
+    class AdjustmentDirection(models.TextChoices):
+        """Whether posting an adjustment against this code adds to stock or
+        takes away from it.
+
+        Added for F23. The person posting an adjustment enters a plain,
+        positive count of how many units changed — never a sign — and this
+        is what turns that count into the signed figure the ledger actually
+        stores. Without it, the same "Damaged" code could be posted as a
+        gain by mistake, and nothing here would catch it.
+        """
+
+        INCREASE = "INCREASE", "Increases stock"
+        DECREASE = "DECREASE", "Decreases stock"
 
     code = models.CharField(
         max_length=20,
@@ -213,6 +227,11 @@ class ReasonCode(models.Model):
     name = models.CharField(max_length=120, help_text='For example "Damaged in transit".')
     description = models.TextField(
         blank=True, help_text="When to use this code, for whoever is choosing one."
+    )
+    direction = models.CharField(
+        max_length=8,
+        choices=AdjustmentDirection.choices,
+        help_text="Whether an adjustment posted against this code adds to stock or removes from it.",
     )
 
     # Same "Active Y/N" pattern as Garment and Sku. Codes are retired, never
@@ -358,3 +377,100 @@ class WarehouseTransferLine(models.Model):
 
     def __str__(self):
         return f"{self.quantity} x {self.sku.number}"
+
+
+class InventoryAdjustment(models.Model):
+    """A quantity change against a reason code — F23.
+
+    The generic shape the rest of Phase 2 reuses: physical count
+    corrections, returns and damages are all this same document with a
+    different reason code, so this is the one to get right first.
+
+    One SKU per adjustment for now. Bashir, 28 August 2026: easy to widen to
+    several SKUs later if one reason code ever needs to cover many at once —
+    not built now because nothing has asked for it yet.
+
+    Entering and posting are separate steps, same as WarehouseTransfer: an
+    adjustment can be written down and checked before it actually changes
+    what the system thinks is on the shelf.
+    """
+
+    number = models.CharField(
+        max_length=16,
+        unique=True,
+        editable=False,
+        help_text="System assigned. Unique forever, never reused.",
+    )
+
+    warehouse = models.ForeignKey(
+        "catalog.Warehouse", on_delete=models.PROTECT, related_name="inventory_adjustments"
+    )
+    sku = models.ForeignKey(
+        "catalog.Sku", on_delete=models.PROTECT, related_name="inventory_adjustments"
+    )
+
+    # Always entered as a plain positive count. The reason code decides
+    # whether that increases or decreases stock — see
+    # ReasonCode.AdjustmentDirection — so nobody has to remember which way a
+    # given reason should move the number.
+    quantity = models.PositiveIntegerField(
+        validators=[MinValueValidator(1)],
+        help_text="How many units changed. The reason code decides the direction.",
+    )
+    reason_code = models.ForeignKey(
+        "inventory.ReasonCode",
+        on_delete=models.PROTECT,
+        related_name="adjustments",
+        help_text="Why this adjustment was made. Also decides its direction.",
+    )
+
+    adjustment_date = models.DateField(
+        help_text="The date the change actually happened, e.g. the day of a physical count."
+    )
+
+    # Set when posted, from the SKU's catalog price on adjustment_date — not
+    # looked up again afterwards. Same reasoning as StockMovement.unit_value:
+    # the value of a correction made in January is what the item was worth in
+    # January, whatever the price list says later.
+    unit_value = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        help_text="Set when posted, from the SKU's catalog price on adjustment_date.",
+    )
+    notes = models.TextField(blank=True)
+
+    posted_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When this was posted to the ledger. Blank means not yet posted.",
+    )
+    created_by = models.ForeignKey(
+        "accounts.User", on_delete=models.PROTECT, related_name="+"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-adjustment_date", "-number"]
+        constraints = [
+            # Mirrors stock_movement_is_not_zero: an adjustment of nothing
+            # is not an adjustment.
+            models.CheckConstraint(
+                condition=models.Q(quantity__gt=0), name="adjustment_quantity_is_positive"
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.number}: {self.quantity} x {self.sku.number} ({self.reason_code.code})"
+
+    @property
+    def is_posted(self) -> bool:
+        return self.posted_at is not None
+
+    def save(self, *args, **kwargs):
+        if not self.number:
+            from inventory.services import next_adjustment_number
+
+            self.number = next_adjustment_number()
+        super().save(*args, **kwargs)
