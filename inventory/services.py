@@ -413,10 +413,20 @@ def create_adjustment(*, warehouse, sku, quantity, reason_code, created_by, adju
     `PriceNotSet` propagates rather than being caught here, so an adjustment
     that could never be valued is never even written down. Checked again at
     posting, because a reprice can happen in between.
+
+    Also refused up front if the reason code decreases stock and there is
+    not enough on hand to take it from — `NotEnoughStock` propagates, same
+    exception a transfer raises for the same reason. Negative stock is not a
+    number anyone can act on: it means either the count or the ledger is
+    wrong, and writing an adjustment on top would only bury which. An
+    increase has no such limit, so this only runs for DECREASE codes.
     """
     from catalog.services import price_for_sku
 
     price_for_sku(sku, adjustment_date)
+
+    if reason_code.direction == ReasonCode.AdjustmentDirection.DECREASE:
+        _refuse_if_short(warehouse, [{"sku": sku, "quantity": quantity}], as_of=adjustment_date)
 
     adjustment = InventoryAdjustment(
         warehouse=warehouse,
@@ -454,10 +464,23 @@ def post_adjustment(adjustment, *, posted_by):
     Raises `AdjustmentAlreadyPosted` if this has already run once, and lets
     `catalog.services.PriceNotSet` propagate if the SKU's price was removed
     since the adjustment was created.
+
+    Stock is re-checked here too, for a DECREASE code, even though
+    create_adjustment() already checked it — time passes between writing an
+    adjustment down and posting it, and something else may have moved the
+    stock in between. Same reasoning as post_transfer() re-checking
+    NotEnoughStock rather than trusting the check from create_transfer().
     """
     if adjustment.is_posted:
         raise AdjustmentAlreadyPosted(
             f"{adjustment.number} was already posted on {adjustment.posted_at:%Y-%m-%d}."
+        )
+
+    if adjustment.reason_code.direction == ReasonCode.AdjustmentDirection.DECREASE:
+        _refuse_if_short(
+            adjustment.warehouse,
+            [{"sku": adjustment.sku, "quantity": adjustment.quantity}],
+            as_of=adjustment.adjustment_date,
         )
 
     from catalog.services import price_for_sku

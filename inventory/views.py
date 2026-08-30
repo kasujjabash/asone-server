@@ -347,16 +347,22 @@ class InventoryAdjustmentViewSet(viewsets.ModelViewSet):
         description=(
             "Writes the adjustment down. **Does not change stock** — posting "
             "does that, as a separate step, so it can be checked first.\n\n"
-            "Refused if the SKU has no catalog price on the adjustment date."
+            "Refused if the SKU has no catalog price on the adjustment date, "
+            "or if the reason code decreases stock and there is not enough "
+            "on hand to take it from."
         ),
     )
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        adjustment = services.create_adjustment(
-            created_by=request.user, **serializer.validated_data
-        )
+        try:
+            adjustment = services.create_adjustment(
+                created_by=request.user, **serializer.validated_data
+            )
+        except services.NotEnoughStock as exc:
+            raise DRFValidationError({"quantity": str(exc)}) from exc
+
         return Response(
             InventoryAdjustmentSerializer(adjustment).data, status=status.HTTP_201_CREATED
         )
@@ -382,6 +388,8 @@ class InventoryAdjustmentViewSet(viewsets.ModelViewSet):
             services.post_adjustment(adjustment, posted_by=request.user)
         except services.AdjustmentAlreadyPosted as exc:
             raise DRFValidationError({"detail": str(exc)}) from exc
+        except services.NotEnoughStock as exc:
+            raise DRFValidationError({"quantity": str(exc)}) from exc
         except PriceNotSet as exc:
             raise DRFValidationError({"sku": str(exc)}) from exc
 
