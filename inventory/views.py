@@ -313,8 +313,11 @@ class InventoryAdjustmentViewSet(viewsets.ModelViewSet):
     """A quantity change against a reason code — F23.
 
     The generic shape the rest of Phase 2 reuses: physical count
-    corrections, returns and damages will all be this same document with a
-    different reason code.
+    corrections (F24), returns (F26) and damages (F27) are all this same
+    document, just posted with a different reason code — `CORR_UP`/
+    `CORR_DOWN`, `RET`, `DMG` respectively. None of the three needed a new
+    model, serializer or endpoint; see test_returns_and_damages.py and
+    test_correction_codes.py for the proof, not just the claim.
 
     Finance only, for both reading and writing — unlike most master data,
     this is not routed through MasterDataAccess. AsOne's "Inventory Adj"
