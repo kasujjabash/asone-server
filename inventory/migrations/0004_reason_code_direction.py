@@ -17,9 +17,10 @@ def set_known_directions(apps, schema_editor):
         "XFER": "DECREASE",
         "LOSS": "DECREASE",
         "DMG": "DECREASE",
-        # A physical count can go either way in reality; a single code with
-        # one fixed direction is a known simplification of F23's first cut,
-        # not a considered answer. Revisit when F24 is built.
+        # A physical count can go either way in reality, so one code with a
+        # fixed direction was never going to survive F24. Migration 0006
+        # splits this into CORR_UP and CORR_DOWN and retires CORR; the value
+        # here only matters for the moment between the two migrations.
         "CORR": "DECREASE",
     }
     for code, direction in directions.items():

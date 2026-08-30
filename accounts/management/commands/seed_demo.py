@@ -64,7 +64,12 @@ REASON_CODES = [
     ("XFER", "Warehouse transfer", "Stock moved between Namayemba and Serere.", "DECREASE"),
     ("LOSS", "Pick up or loss", "Stock gone missing, or collected without an order.", "DECREASE"),
     ("DMG", "Damaged", "Damaged in transit or in the warehouse, no longer sellable.", "DECREASE"),
-    ("CORR", "Inventory correction", "Physical count differs from the system.", "DECREASE"),
+    # A physical count can land either side of the system figure, so a
+    # correction needs a code each way — see inventory migration 0006.
+    ("CORR_UP", "Inventory correction — count higher",
+     "A physical count found more than the system expected.", "INCREASE"),
+    ("CORR_DOWN", "Inventory correction — count lower",
+     "A physical count found less than the system expected.", "DECREASE"),
 ]
 
 # email, first name, last name, role, warehouse, school
