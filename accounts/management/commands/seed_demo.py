@@ -58,12 +58,13 @@ PRICES_ACTIVE_FROM = date(2026, 1, 1)
 
 #: The four AsOne named on p.3, followed by "May be more…" — so this is a
 #: starting set for Central Office to extend, not the definitive list.
+#: code, name, description, direction (F23 — see ReasonCode.AdjustmentDirection)
 REASON_CODES = [
-    ("RET", "Return", "Uniform returned by a school, back into sellable stock."),
-    ("XFER", "Warehouse transfer", "Stock moved between Namayemba and Serere."),
-    ("LOSS", "Pick up or loss", "Stock gone missing, or collected without an order."),
-    ("DMG", "Damaged", "Damaged in transit or in the warehouse, no longer sellable."),
-    ("CORR", "Inventory correction", "Physical count differs from the system."),
+    ("RET", "Return", "Uniform returned by a school, back into sellable stock.", "INCREASE"),
+    ("XFER", "Warehouse transfer", "Stock moved between Namayemba and Serere.", "DECREASE"),
+    ("LOSS", "Pick up or loss", "Stock gone missing, or collected without an order.", "DECREASE"),
+    ("DMG", "Damaged", "Damaged in transit or in the warehouse, no longer sellable.", "DECREASE"),
+    ("CORR", "Inventory correction", "Physical count differs from the system.", "DECREASE"),
 ]
 
 # email, first name, last name, role, warehouse, school
@@ -217,9 +218,10 @@ class Command(BaseCommand):
         can start from AsOne's four rather than a blank table.
         """
         self.stdout.write(self.style.MIGRATE_HEADING("Inventory adjustment reason codes"))
-        for code, name, description in REASON_CODES:
+        for code, name, description, direction in REASON_CODES:
             _, created = ReasonCode.objects.get_or_create(
-                code=code, defaults={"name": name, "description": description}
+                code=code,
+                defaults={"name": name, "description": description, "direction": direction},
             )
             verb = self.style.SUCCESS("created") if created else "exists "
             self.stdout.write(f"  {verb}  {code:5} {name}")

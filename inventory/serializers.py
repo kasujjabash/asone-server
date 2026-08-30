@@ -8,7 +8,13 @@ from config.validators import CaseInsensitiveUniqueValidator
 from catalog.models import Sku
 from rest_framework import serializers
 
-from .models import ReasonCode, StockMovement, WarehouseTransfer, WarehouseTransferLine
+from .models import (
+    InventoryAdjustment,
+    ReasonCode,
+    StockMovement,
+    WarehouseTransfer,
+    WarehouseTransferLine,
+)
 
 
 class StockMovementSerializer(serializers.ModelSerializer):
@@ -104,7 +110,7 @@ class ReasonCodeSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = ReasonCode
-        fields = ("id", "code", "name", "description", "is_active")
+        fields = ("id", "code", "name", "description", "direction", "is_active")
 
 
 # ---------------------------------------------------------------------------
@@ -198,3 +204,74 @@ class WarehouseTransferWriteSerializer(serializers.ModelSerializer):
                 f"Each SKU may appear once. Repeated: {', '.join(sorted(repeated))}."
             )
         return value
+
+
+# ---------------------------------------------------------------------------
+# Inventory adjustments — F23
+# ---------------------------------------------------------------------------
+
+
+class InventoryAdjustmentSerializer(serializers.ModelSerializer):
+    warehouse_name = serializers.CharField(source="warehouse.name", read_only=True)
+    sku_number = serializers.CharField(source="sku.number", read_only=True)
+    sku_description = serializers.CharField(source="sku.description", read_only=True)
+    reason_code_code = serializers.CharField(source="reason_code.code", read_only=True)
+    reason_code_name = serializers.CharField(source="reason_code.name", read_only=True)
+    created_by_name = serializers.CharField(source="created_by.get_full_name", read_only=True)
+    is_posted = serializers.BooleanField(read_only=True)
+
+    class Meta:
+        model = InventoryAdjustment
+        fields = (
+            "id",
+            "number",
+            "warehouse",
+            "warehouse_name",
+            "sku",
+            "sku_number",
+            "sku_description",
+            "quantity",
+            "reason_code",
+            "reason_code_code",
+            "reason_code_name",
+            "adjustment_date",
+            "unit_value",
+            "notes",
+            "posted_at",
+            "is_posted",
+            "created_by",
+            "created_by_name",
+            "created_at",
+        )
+        read_only_fields = ("id", "number", "unit_value", "posted_at", "created_by", "created_at")
+
+
+class InventoryAdjustmentWriteSerializer(serializers.ModelSerializer):
+    """Preparing an adjustment. Does not touch the ledger — posting does that."""
+
+    class Meta:
+        model = InventoryAdjustment
+        fields = ("warehouse", "sku", "quantity", "reason_code", "adjustment_date", "notes")
+
+    def validate(self, attrs):
+        """Refuse an adjustment for a SKU with no catalog price.
+
+        Mirrors the group order's line-pricing check: an adjustment that can
+        never be valued should not be written down in the first place, not
+        discovered as a failure only once someone tries to post it.
+        """
+        from catalog.services import PriceNotSet, price_for_sku
+
+        try:
+            price_for_sku(attrs["sku"], attrs["adjustment_date"])
+        except PriceNotSet:
+            raise serializers.ValidationError(
+                {
+                    "sku": (
+                        f"{attrs['sku'].number} has no price on "
+                        f"{attrs['adjustment_date']:%Y-%m-%d}, so this adjustment "
+                        "cannot be valued."
+                    )
+                }
+            )
+        return attrs

@@ -36,7 +36,9 @@ class CaseDuplicatesAreRejectedCleanly(TestCase):
         Kit.objects.create(
             kit_number="PS-01", name="Starter", school_level=Kit.SchoolLevel.PRIMARY
         )
-        ReasonCode.objects.create(code="DMG", name="Damaged")
+        ReasonCode.objects.create(
+            code="DMG", name="Damaged", direction=ReasonCode.AdjustmentDirection.DECREASE
+        )
 
     def post(self, route, body):
         """Each POST in its own block.

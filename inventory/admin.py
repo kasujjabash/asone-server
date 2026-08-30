@@ -2,7 +2,13 @@
 
 from django.contrib import admin
 
-from .models import ReasonCode, StockMovement, WarehouseTransfer, WarehouseTransferLine
+from .models import (
+    InventoryAdjustment,
+    ReasonCode,
+    StockMovement,
+    WarehouseTransfer,
+    WarehouseTransferLine,
+)
 
 
 @admin.register(StockMovement)
@@ -80,4 +86,39 @@ class WarehouseTransferAdmin(admin.ModelAdmin):
     def has_delete_permission(self, request, obj=None):
         """A posted transfer is the source of ledger rows; an unposted one
         still records that somebody intended to move stock."""
+        return False
+
+
+@admin.register(InventoryAdjustment)
+class InventoryAdjustmentAdmin(admin.ModelAdmin):
+    """A quantity change against a reason code — F23.
+
+    Posting is deliberately not offered here, same reasoning as
+    WarehouseTransferAdmin: it writes a permanent ledger row and needs its
+    failures — an already-posted adjustment, a SKU that lost its price —
+    reported properly through the API, not swallowed by the admin.
+    """
+
+    list_display = (
+        "number",
+        "adjustment_date",
+        "warehouse",
+        "sku",
+        "quantity",
+        "reason_code",
+        "is_posted",
+    )
+    list_filter = ("warehouse", "reason_code", "adjustment_date")
+    search_fields = ("number", "sku__number", "sku__description", "notes")
+    date_hierarchy = "adjustment_date"
+    readonly_fields = ("number", "unit_value", "posted_at", "created_by", "created_at")
+    autocomplete_fields = ("sku",)
+
+    @admin.display(boolean=True, description="Posted")
+    def is_posted(self, obj):
+        return obj.is_posted
+
+    def has_delete_permission(self, request, obj=None):
+        """An unposted adjustment still records intent; a posted one is the
+        source of a ledger row."""
         return False

@@ -11,6 +11,7 @@ router = DefaultRouter()
 router.register("movements", views.StockMovementViewSet, "movement")
 router.register("reason-codes", views.ReasonCodeViewSet, "reason-code")
 router.register("transfers", views.WarehouseTransferViewSet, "transfer")
+router.register("adjustments", views.InventoryAdjustmentViewSet, "adjustment")
 
 urlpatterns = [
     path("stock-levels/", views.StockLevelView.as_view(), name="stock-levels"),
