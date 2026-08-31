@@ -22,6 +22,12 @@ class OrderStatus(models.TextChoices):
     CANCELLED = "CANCELLED", "Cancelled"
 
 
+#: Named for the generated API client — see SPECTACULAR_SETTINGS. A
+#: procurement order is Open, Closed or Cancelled; a school order has a
+#: different life entirely, so the two must not share an enum name.
+PROCUREMENT_ORDER_STATUS_CHOICES = OrderStatus.choices
+
+
 class OrderDocument(models.Model):
     """Abstract base for a numbered, dated order document."""
 

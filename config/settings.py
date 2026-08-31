@@ -55,6 +55,7 @@ INSTALLED_APPS = [
     "accounts",
     "catalog",
     "inventory",
+    "orders",
     "procurement",
 ]
 
@@ -230,6 +231,11 @@ SPECTACULAR_SETTINGS = {
     "ENUM_NAME_OVERRIDES": {
         "SchoolLevelEnum": "catalog.models.sites.SCHOOL_LEVEL_CHOICES",
         "GarmentSchoolLevelEnum": "catalog.models.products.GARMENT_SCHOOL_LEVEL_CHOICES",
+        # Two different things are called a "status" and they share no values:
+        #   procurement  Open, Closed, Cancelled
+        #   school order Hold, Released, Picked, Shipped, Cancelled
+        "ProcurementOrderStatusEnum": "procurement.models.base.PROCUREMENT_ORDER_STATUS_CHOICES",
+        "SchoolOrderStatusEnum": "orders.models.school_orders.SCHOOL_ORDER_STATUS_CHOICES",
     },
 }
 

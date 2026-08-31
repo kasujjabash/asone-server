@@ -20,6 +20,7 @@ from django.db.models import Count
 from drf_spectacular.utils import OpenApiParameter, extend_schema
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.exceptions import ValidationError as DRFValidationError
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -81,6 +82,48 @@ def _requested_date(request) -> date:
         raise DRFValidationError(
             {"on": f"'{raw}' is not a date. Use YYYY-MM-DD."}
         ) from None
+
+
+def _price_list_level(request):
+    """Which price list this caller may see — F29 and F51 in one place.
+
+    Two different features read the same data and must not be given the same
+    freedom:
+
+      F51 (report)  Leads, warehouse and Finance ask for the list they want.
+      F29 (POS)     A school works from **its own** list. The system knows
+                    which from the school on their account, so nobody has to
+                    choose — and choosing wrongly is not possible.
+
+    That matters in both directions. Left to a default, a High School was
+    served the Primary list silently; left to a query parameter, a Primary
+    school could pull up High School garments its students cannot order.
+
+    A school asking for its own level explicitly is fine — a frontend may
+    well send it. Asking for the other one is refused rather than quietly
+    corrected, because it means the client believes something untrue and a
+    silent correction would hide that.
+    """
+    user = request.user
+
+    if user.role != User.Role.SCHOOL_STAFF:
+        return _requested_level(request)
+
+    if user.school is None:
+        raise PermissionDenied(
+            "Your account is not attached to a school, so it has no price list."
+        )
+
+    own_level = user.school.level
+    asked_for = request.query_params.get("level")
+
+    if asked_for and asked_for != own_level:
+        raise PermissionDenied(
+            f"{user.school.name} is a {user.school.get_level_display()}. "
+            "You can only work from its price list."
+        )
+
+    return own_level
 
 
 def _requested_level(request, *, required=True):
@@ -275,6 +318,10 @@ class GarmentPriceViewSet(viewsets.ModelViewSet):
     description=(
         "Active garments on that price list with their price on that date, "
         "ordered by name. Garments marked `BOTH` appear on each list.\n\n"
+        "**School staff do not pass `level`** — F29 says a school works from "
+        "its own list, so the level comes from the school on their account. "
+        "Asking for the other school level is refused, not quietly "
+        "corrected. Every other role names the list it wants (F51).\n\n"
         "Garments with no price on the date are **omitted, not shown at "
         "zero** — a price list is a document a school orders from, and a line "
         "with no price is worse than no line. Use `/price-lists/gaps/` to "
@@ -288,7 +335,7 @@ class PriceListView(APIView):
     read_roles = (Role.WAREHOUSE_STAFF, Role.SCHOOL_STAFF, Role.FINANCE)
 
     def get(self, request):
-        level = _requested_level(request)
+        level = _price_list_level(request)
         rows = services.price_list(level, _requested_date(request))
         return Response(PriceListRowSerializer(rows, many=True).data)
 

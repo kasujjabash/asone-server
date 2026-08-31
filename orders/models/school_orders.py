@@ -1,0 +1,201 @@
+"""A school order — F30, F31, F32, F33.
+
+One student's uniform, ordered by their school. Four features that read as
+separate items on the checklist are really one document:
+
+    F30  ordered at kit and/or item level
+    F31  the student's name, as free text
+    F32  created on Hold until payment is confirmed
+    F33  a kit becomes its component SKUs for the warehouse to pick
+
+Two things AsOne was explicit about (p.7):
+
+**Students have no accounts.** The school is the customer and the ship-to
+address. The student's name is a free-text field on the order, used with the
+invoice number so the school can hand the right parcel to the right child.
+
+**A school orders at kit or item level; the warehouse always picks SKUs.**
+So a kit line is exploded into its components when the order is placed — and
+that explosion is stored, not recomputed. If Central Office edits the kit's
+bill of materials next term, an order placed today must still mean what it
+meant today. Same reasoning as dated prices: a document records what was
+true when it was written.
+"""
+
+from django.core.exceptions import ValidationError
+from django.core.validators import MinValueValidator
+from django.db import models
+
+
+class OrderStatus(models.TextChoices):
+    """Where an order is in its life — p.7 and p.8.
+
+    Hold and Cancelled come from the point of sale; the rest are what the
+    warehouse does with it. Only HOLD and CANCELLED are reachable today:
+    releasing an order depends on payment confirmation, and what confirms
+    payment is open question Q2 ("School Monitor").
+    """
+
+    HOLD = "HOLD", "On hold — awaiting payment"
+    RELEASED = "RELEASED", "Released to the warehouse"
+    PICKED = "PICKED", "Picked"
+    SHIPPED = "SHIPPED", "Shipped"
+    CANCELLED = "CANCELLED", "Cancelled"
+
+
+#: Named for the generated API client. Hold, Released, Picked, Shipped,
+#: Cancelled — nothing like a procurement order's three states.
+SCHOOL_ORDER_STATUS_CHOICES = OrderStatus.choices
+
+
+class SchoolOrder(models.Model):
+    """One student's uniform order, placed by their school.
+
+    The number doubles as the invoice number. AsOne's definitions page treats
+    them as one thing — "the Invoice# and Student's Name will be used by the
+    school to deliver shipments to the correct students" — so there is no
+    separate invoice numbering to keep in step.
+    """
+
+    number = models.CharField(
+        max_length=16,
+        unique=True,
+        editable=False,
+        help_text="System assigned. Also the invoice number. Never reused.",
+    )
+
+    school = models.ForeignKey(
+        "catalog.School", on_delete=models.PROTECT, related_name="orders"
+    )
+
+    # Free text, deliberately. Students have no accounts and are not a table:
+    # the school knows who this is, and needs the name printed so it can hand
+    # the parcel to the right child.
+    student_name = models.CharField(
+        max_length=150,
+        help_text="The student this uniform is for. Free text — students have no accounts.",
+    )
+
+    order_date = models.DateField(help_text="The date the school placed it.")
+    status = models.CharField(
+        max_length=12, choices=OrderStatus.choices, default=OrderStatus.HOLD
+    )
+    notes = models.TextField(blank=True)
+
+    created_by = models.ForeignKey(
+        "accounts.User", on_delete=models.PROTECT, related_name="+"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-order_date", "-number"]
+        indexes = [
+            # The two questions a school asks of this table: what is
+            # outstanding for us, and where is this student's order.
+            models.Index(fields=["school", "status"]),
+            models.Index(fields=["student_name"]),
+        ]
+
+    def __str__(self):
+        return f"{self.number} for {self.student_name}"
+
+    @property
+    def warehouse(self):
+        """Which warehouse fills this — the school's own, and only its own.
+
+        A school orders from one warehouse and no other. A *backorder* may
+        later be filled by a different warehouse shipping direct to the
+        school (decision D2), but that is a fulfilment decision made after
+        the fact, not something the school chooses here.
+        """
+        return self.school.primary_warehouse
+
+    @property
+    def total(self):
+        """What the school owes. Summed from the lines, never stored.
+
+        A stored total would go stale the moment a line changed, and the
+        first anyone would know is an invoice that does not add up.
+        """
+        return sum((line.line_total for line in self.lines.all()), start=0)
+
+    def clean(self):
+        super().clean()
+        if self.student_name is not None and not self.student_name.strip():
+            raise ValidationError(
+                {
+                    "student_name": (
+                        "A student's name is required — it is how the school "
+                        "hands the uniform to the right child."
+                    )
+                }
+            )
+
+    def save(self, *args, **kwargs):
+        if not self.number:
+            from orders.services import next_order_number
+
+            self.number = next_order_number()
+
+        # Stored trimmed: " Miriam " and "Miriam" are the same child, and a
+        # stray space is enough to lose an order in a search.
+        if self.student_name:
+            self.student_name = self.student_name.strip()
+
+        super().save(*args, **kwargs)
+
+
+class SchoolOrderLine(models.Model):
+    """One SKU on an order, and what it cost when the order was placed.
+
+    Always a SKU, even when the school ordered a kit. The warehouse picks
+    individual garments off a shelf; it never picks "a kit". `from_kit`
+    records which kit a line came from so the invoice can still show the
+    school what it asked for.
+    """
+
+    order = models.ForeignKey(
+        SchoolOrder, on_delete=models.CASCADE, related_name="lines"
+    )
+    sku = models.ForeignKey("catalog.Sku", on_delete=models.PROTECT, related_name="+")
+    quantity = models.PositiveIntegerField(validators=[MinValueValidator(1)])
+
+    # Copied from the price list when the order was placed, exactly as a
+    # production order line copies it. An invoice reprinted next term has to
+    # show what the school was actually charged.
+    unit_price = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        help_text="The price on the day the order was placed. Never recalculated.",
+    )
+
+    # Set when the line came from exploding a kit. Null for a line the school
+    # ordered as an individual item. Kept so the invoice can group a kit back
+    # together, and so nobody has to guess later why six lines appeared at once.
+    from_kit = models.ForeignKey(
+        "catalog.Kit",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="order_lines",
+        help_text="The kit this line was exploded from, if any.",
+    )
+
+    class Meta:
+        ordering = ["sku__description"]
+        constraints = [
+            # One line per SKU per source. The same shirt can legitimately
+            # appear twice on one order — once inside a kit and once ordered
+            # separately — but not twice from the same place.
+            models.UniqueConstraint(
+                fields=["order", "sku", "from_kit"],
+                name="unique_sku_per_order_source",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.quantity} x {self.sku.number}"
+
+    @property
+    def line_total(self):
+        return self.unit_price * self.quantity
