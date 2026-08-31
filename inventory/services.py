@@ -129,15 +129,22 @@ def _ledger(warehouse=None, sku=None, as_of=None, stock_status=StockStatus.AVAIL
     return queryset
 
 
-def stock_level(sku, warehouse, as_of=None) -> int:
-    """How many of ``sku`` are at ``warehouse``.
+def stock_level(sku, warehouse, as_of=None, stock_status=StockStatus.AVAILABLE) -> int:
+    """How many of ``sku`` are at ``warehouse``, in a given status.
 
     Summed from the ledger, never read from a stored figure. Returns 0 when
     nothing has ever moved — which is the truthful answer, not a missing one.
+
+    Defaults to AVAILABLE, which is what every existing caller means by
+    "stock level". Pass ``stock_status=StockStatus.PICK`` to ask how much is
+    currently reserved for picking instead (F39) — a different question,
+    not a filter on the same one.
     """
-    return _ledger(warehouse=warehouse, sku=sku, as_of=as_of).aggregate(
-        level=Coalesce(Sum("quantity"), Value(0), output_field=IntegerField())
-    )["level"]
+    return _ledger(
+        warehouse=warehouse, sku=sku, as_of=as_of, stock_status=stock_status
+    ).aggregate(level=Coalesce(Sum("quantity"), Value(0), output_field=IntegerField()))[
+        "level"
+    ]
 
 
 def stock_levels(warehouse=None, as_of=None, include_zero=False):

@@ -138,3 +138,15 @@ class OrderDemandRowSerializer(serializers.Serializer):
     sku_number = serializers.CharField()
     sku_description = serializers.CharField()
     quantity = serializers.IntegerField()
+
+
+class OrderAvailabilityRowSerializer(serializers.Serializer):
+    """One SKU on the order, and whether there is enough of it — F37."""
+
+    sku_number = serializers.CharField(source="sku.number")
+    sku_description = serializers.CharField(source="sku.description")
+    needed = serializers.IntegerField()
+    available = serializers.IntegerField()
+    shortfall = serializers.IntegerField(
+        help_text="How many short. Zero means this line can be filled."
+    )
