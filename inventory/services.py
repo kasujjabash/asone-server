@@ -507,3 +507,51 @@ def post_adjustment(adjustment, *, posted_by):
     adjustment.save(update_fields=["unit_value", "posted_at"])
 
     return movement
+
+
+# ---------------------------------------------------------------------------
+# Physical count correction — F24
+# ---------------------------------------------------------------------------
+
+
+@transaction.atomic
+def correct_count(*, warehouse, sku, counted_quantity, adjustment_date, created_by, notes=""):
+    """Compare a physical count to what the system thinks is on hand, and
+    post the difference — the actual F24 requirement.
+
+    F23's generic adjustment endpoint makes the *person* do this: look up
+    the system figure, count the shelf, subtract, and pick CORR_UP or
+    CORR_DOWN by hand. This does the comparing itself — the caller supplies
+    only what was actually counted.
+
+    Posted immediately, not left as an unposted draft like create_adjustment
+    normally would be. A physical count is already the check step; a
+    correction sitting unposted would mean the *next* count is compared
+    against a system figure that does not yet reflect this one.
+
+    Returns the posted InventoryAdjustment, or None if the count matches the
+    system exactly. A match is not an error — it is the expected, ordinary
+    outcome of most counts — so nothing is written for it: there is no such
+    thing as a zero-quantity adjustment (see adjustment_quantity_is_positive).
+    """
+    system_level = stock_level(sku, warehouse, as_of=adjustment_date)
+    difference = counted_quantity - system_level
+
+    if difference == 0:
+        return None
+
+    reason_code = ReasonCode.objects.get(
+        code="CORR_UP" if difference > 0 else "CORR_DOWN"
+    )
+
+    adjustment = create_adjustment(
+        warehouse=warehouse,
+        sku=sku,
+        quantity=abs(difference),
+        reason_code=reason_code,
+        adjustment_date=adjustment_date,
+        created_by=created_by,
+        notes=notes,
+    )
+    post_adjustment(adjustment, posted_by=created_by)
+    return adjustment
