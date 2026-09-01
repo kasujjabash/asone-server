@@ -277,3 +277,58 @@ class WhatASchoolMayNotOrder(OrderSetup):
 
         self.assertEqual(SchoolOrder.objects.count(), before)
         self.assertEqual(SchoolOrderLine.objects.count(), 0)
+
+
+class AnOrderMustHaveSomethingOnIt(OrderSetup):
+    """A kit with no components used to slip through.
+
+    The check tested the *inputs* — a kit was named — not the result after
+    explosion. An empty kit passed it and produced an order with no lines and
+    a total of nothing: a parent handed an invoice number for an empty
+    parcel, and a warehouse with nothing to pick.
+
+    Empty kits are not corrupt data. They are created in the admin and filled
+    in afterwards, so this is a state the system will genuinely see.
+    """
+
+    def an_empty_kit(self):
+        return Kit.objects.create(
+            kit_number="PS-EMPTY",
+            name="Not filled in yet",
+            school_level=Kit.SchoolLevel.PRIMARY,
+        )
+
+    def test_ordering_a_kit_with_no_components_is_refused(self):
+        with self.assertRaises(EmptyOrder):
+            self.place(kits=[{"kit": self.an_empty_kit(), "quantity": 1}])
+
+    def test_the_refusal_names_the_kit(self):
+        """"Your order came to nothing" would send someone hunting."""
+        with self.assertRaises(EmptyOrder) as caught:
+            self.place(kits=[{"kit": self.an_empty_kit(), "quantity": 1}])
+
+        self.assertIn("PS-EMPTY", str(caught.exception))
+
+    def test_an_empty_kit_alongside_a_real_item_is_still_refused(self):
+        """The school asked for that kit. Quietly dropping it and charging
+        for the rest would be worse than refusing."""
+        with self.assertRaises(EmptyOrder):
+            self.place(
+                kits=[{"kit": self.an_empty_kit(), "quantity": 1}],
+                skus=[{"sku": self.socks, "quantity": 2}],
+            )
+
+    def test_nothing_is_left_behind_when_it_is_refused(self):
+        before = SchoolOrder.objects.count()
+
+        try:
+            self.place(kits=[{"kit": self.an_empty_kit(), "quantity": 1}])
+        except EmptyOrder:
+            pass
+
+        self.assertEqual(SchoolOrder.objects.count(), before)
+
+    def test_a_kit_with_components_is_still_fine(self):
+        order = self.place(kits=[{"kit": self.kit, "quantity": 1}])
+
+        self.assertEqual(order.lines.count(), 2)

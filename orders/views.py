@@ -9,14 +9,15 @@ school's orders and can only create orders for that school.
 from django.db.models import Prefetch
 from drf_spectacular.utils import extend_schema
 from rest_framework import status, viewsets
+from rest_framework.generics import ListAPIView
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.exceptions import ValidationError as DRFValidationError
 from rest_framework.response import Response
 
+from accounts.models import User
 from accounts.permissions import (
     AUTHENTICATED,
-    CanEnterSchoolOrders,
     CanReceiveAndShip,
     scope_to_user_site,
 )
@@ -24,7 +25,11 @@ from catalog.services import PriceNotSet
 
 from . import services
 from .models import SchoolOrder, SchoolOrderLine
+from .permissions import CanReadSchoolOrders, SchoolOrderAccess
 from .serializers import (
+    CancelOrderSerializer,
+    InvoiceSerializer,
+    OrderOnHoldSerializer,
     OrderAvailabilityRowSerializer,
     OrderDemandRowSerializer,
     SchoolOrderSerializer,
@@ -52,8 +57,11 @@ class SchoolOrderViewSet(viewsets.ModelViewSet):
     whatever the request body says.
 
     **Orders are never deleted.** A school hands the number to a parent as
-    an invoice, so the document has to survive. Cancelling is the way out —
-    which is F36 and not built yet.
+    an invoice, so the document has to survive. Cancelling (F36) is the way
+    out, and only while the order is unpaid.
+
+    Finance may **read** an order and its invoice — F34 gives them a view —
+    but may not place or cancel one. See orders/permissions.py.
 
     `availability`, `pick_list` and `pick` (F37, F38, F39) are the warehouse
     fulfilment actions on the same order — gated by `CanReceiveAndShip`
@@ -61,7 +69,10 @@ class SchoolOrderViewSet(viewsets.ModelViewSet):
     column from everything else on this viewset.
     """
 
-    permission_classes = [*AUTHENTICATED, CanEnterSchoolOrders]
+    permission_classes = [*AUTHENTICATED, SchoolOrderAccess]
+    # F34 gives Finance a view of the invoice. Placing and cancelling stay
+    # School Staff only — SchoolOrderAccess splits read from write.
+    read_roles = (User.Role.FINANCE,)
     filterset_fields = ("status", "order_date")
     search_fields = ("number", "student_name")
     http_method_names = ["get", "post", "patch", "head", "options"]
@@ -238,3 +249,103 @@ class SchoolOrderViewSet(viewsets.ModelViewSet):
 
         order.refresh_from_db()
         return Response(SchoolOrderSerializer(order).data)
+
+    @extend_schema(
+        summary="The invoice",
+        responses=InvoiceSerializer,
+        description=(
+            "F34 — the order as a document a school can hand to a parent.\n\n"
+            "Same number as the order: AsOne treats the two as one thing, "
+            "because the school uses the invoice number and the student's "
+            "name to give the right parcel to the right child.\n\n"
+            "Kit lines are grouped back under the kit the school chose, with "
+            "a subtotal — AsOne's definition names the kit number \"if "
+            "used\". Individually ordered items are listed separately. That "
+            "regrouping is presentation only; the order's lines remain "
+            "individual SKUs, which is what the warehouse picks."
+        ),
+    )
+    @action(detail=True, methods=["get"])
+    def invoice(self, request, pk=None):
+        order = self.get_object()
+        grouped = services.invoice_for(order)
+
+        return Response(
+            InvoiceSerializer(
+                {
+                    "number": order.number,
+                    "student_name": order.student_name,
+                    "school": order.school,
+                    "order_date": order.order_date,
+                    "status": order.status,
+                    "get_status_display": order.get_status_display(),
+                    "total": order.total,
+                    "kits": grouped["kits"],
+                    "items": grouped["items"],
+                    "cancelled_at": order.cancelled_at,
+                    "cancellation_reason": order.cancellation_reason,
+                }
+            ).data
+        )
+
+    @extend_schema(
+        summary="Cancel an unpaid invoice",
+        request=CancelOrderSerializer,
+        responses={200: SchoolOrderSerializer},
+        description=(
+            "F36 — the school withdraws an order a parent has not paid for.\n\n"
+            "The order is **cancelled, not deleted**. The school has already "
+            "given that number to a parent, so the document has to survive "
+            "and say what became of it. Who cancelled it and when are "
+            "recorded.\n\n"
+            "Only while the order is still on Hold. Once payment is confirmed "
+            "and the order released, cancelling raises questions AsOne has "
+            "not answered — whether picked stock goes back on the shelf, and "
+            "what happens to money already taken — so it is refused rather "
+            "than guessed at."
+        ),
+    )
+    @action(detail=True, methods=["post"])
+    def cancel(self, request, pk=None):
+        order = self.get_object()
+
+        serializer = CancelOrderSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        try:
+            services.cancel_order(
+                order,
+                cancelled_by=request.user,
+                reason=serializer.validated_data["reason"],
+            )
+        except services.CannotCancel as exc:
+            raise DRFValidationError({"detail": str(exc)}) from exc
+
+        order.refresh_from_db()
+        return Response(SchoolOrderSerializer(order).data)
+
+
+@extend_schema(
+    tags=["Orders — reports"],
+    summary="School orders still on hold",
+    responses=OrderOnHoldSerializer(many=True),
+    description=(
+        "F53 — invoices raised but not yet paid or released.\n\n"
+        "The queue a school works from: what is waiting on a parent to pay. "
+        "The leads and Finance see every school; a school clerk sees only "
+        "its own.\n\n"
+        "Oldest first, because that is the order they should be chased in."
+    ),
+)
+class OrdersOnHoldView(ListAPIView):
+    """F53. Wider than the point of sale itself — the leads read this too,
+    even though they cannot place an order."""
+
+    serializer_class = OrderOnHoldSerializer
+    permission_classes = [*AUTHENTICATED, CanReadSchoolOrders]
+
+    def get_queryset(self):
+        scoped = scope_to_user_site(
+            SchoolOrder.objects.all(), self.request.user, school_field="school"
+        )
+        return services.orders_on_hold(scoped)

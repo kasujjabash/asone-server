@@ -1,4 +1,8 @@
-"""Business logic for school orders.
+"""Placing, invoicing and cancelling a school order — the point of sale.
+
+Owned by the POS side. Fulfilment — availability, picking, shipping — lives
+next door in fulfilment.py, which is warehouse-facing and a different role
+entirely.
 
 Placing an order is the one thing here worth reading closely. Everything
 else follows from two rules AsOne set out on p.7:
@@ -17,8 +21,8 @@ from django.utils import timezone
 
 from catalog.services import price_for_sku
 
-from .models import SchoolOrder, SchoolOrderLine
-from .models.school_orders import OrderStatus
+from ..models import SchoolOrder, SchoolOrderLine
+from ..models.school_orders import OrderStatus
 
 ORDER_SEQUENCE = "orders_school_order_seq"
 
@@ -56,6 +60,10 @@ class InactiveItem(Exception):
         self.labels = labels
         listed = ", ".join(sorted(labels))
         super().__init__(f"These are no longer available to order: {listed}.")
+
+
+class CannotCancel(Exception):
+    """The order has moved past the point where a school may withdraw it."""
 
 
 class WrongSchoolLevel(Exception):
@@ -104,6 +112,7 @@ def place_order(*, school, student_name, order_date, kits=(), skus=(), created_b
         raise EmptyOrder("An order needs at least one kit or item.")
 
     _refuse_retired(kits, skus)
+    _refuse_empty_kits(kits)
     _refuse_wrong_level(kits, skus, school)
 
     order = SchoolOrder(
@@ -117,7 +126,14 @@ def place_order(*, school, student_name, order_date, kits=(), skus=(), created_b
     order.full_clean(exclude=["number", "created_by", "school"])
     order.save()
 
-    SchoolOrderLine.objects.bulk_create(_build_lines(order, kits, skus, order_date))
+    lines = _build_lines(order, kits, skus, order_date)
+    if not lines:
+        # Belt and braces. _refuse_empty_kits catches the known cause; this
+        # catches any future one, because an order with no lines must never
+        # reach a parent whatever produced it.
+        raise EmptyOrder("That order would have nothing on it.")
+
+    SchoolOrderLine.objects.bulk_create(lines)
     return order
 
 
@@ -174,6 +190,27 @@ def _merge_by_source(lines):
         else:
             merged[key] = line
     return list(merged.values())
+
+
+def _refuse_empty_kits(kits):
+    """A kit with no components cannot be ordered.
+
+    Kits are created in the admin and filled in afterwards, so an empty one
+    is a normal intermediate state — not a corrupt record. But ordering one
+    produces an order with no lines and a total of nothing: a parent handed
+    an invoice number for an empty parcel, and a warehouse with nothing to
+    pick.
+
+    Caught here rather than by checking the built lines, so the message says
+    which kit is the problem instead of "your order came to nothing".
+    """
+    empty = [entry["kit"].kit_number for entry in kits if not entry["kit"].items.exists()]
+
+    if empty:
+        raise EmptyOrder(
+            "These kits have no items in them yet, so there would be nothing "
+            f"to supply: {', '.join(sorted(empty))}."
+        )
 
 
 def _refuse_retired(kits, skus):
@@ -242,118 +279,97 @@ def order_demand(order):
 
 
 # ---------------------------------------------------------------------------
-# Warehouse fulfilment — F37, F38, F39
+# Cancelling — F36
 # ---------------------------------------------------------------------------
 
 
-class OrderNotFillable(Exception):
-    """Not enough stock to fill every line. Refused rather than picked
-    partially — a pick list half completed is worse than one not started."""
-
-    def __init__(self, shortfalls):
-        self.shortfalls = shortfalls
-        listed = ", ".join(
-            f"{row['sku'].number} (need {row['needed']}, have {row['available']})"
-            for row in shortfalls
-        )
-        super().__init__(f"Not enough stock to fill this order: {listed}.")
-
-
-class OrderCannotBePicked(Exception):
-    """The order's own status rules out picking it."""
-
-
-def check_availability(order):
-    """F37 — can the warehouse actually fill this order right now.
-
-    One row per SKU: how many the order needs, how many are AVAILABLE at
-    the order's warehouse, and the shortfall (0 when there is enough).
-
-    pick_order() refuses using this exact comparison, so "can this be
-    filled" (F37) and "fill it" (F39) can never disagree.
-    """
-    from inventory.services import stock_level
-
-    warehouse = order.warehouse
-    rows = []
-    for sku, needed in order_demand(order):
-        available = stock_level(sku, warehouse)
-        rows.append(
-            {
-                "sku": sku,
-                "needed": needed,
-                "available": available,
-                "shortfall": max(needed - available, 0),
-            }
-        )
-    return rows
-
-
 @transaction.atomic
-def pick_order(order, *, picked_by):
-    """Reserve stock for an order — F39: Available -> Pick.
+def cancel_order(order, *, cancelled_by, reason=""):
+    """Withdraw an unpaid invoice — F36.
 
-    Posts two ledger rows per line, at the same value: one out of
-    AVAILABLE, one into PICK. Total stock at the warehouse does not
-    change — what changes is how much of it is still free to promise to a
-    different order. That is what "reserving" means in a ledger with no
-    separate reservations table: recategorise, the same shape a transfer
-    uses between warehouses, here between statuses at one.
+    The order is **cancelled, not deleted**. A school has handed that number
+    to a parent; the document has to survive and say what became of it.
 
-    Refused if the order is cancelled or already picked/shipped. Deliberately
-    **not** gated on OrderStatus.RELEASED: nothing in this codebase can reach
-    that status yet — releasing depends on payment confirmation, open
-    question Q2 — so requiring it here would make F39 permanently
-    unreachable. Revisit once Q2 is settled.
+    Only while the order is still on Hold. F36 says "an unpaid invoice", and
+    once payment is confirmed and the order released, cancelling raises
+    questions nobody has answered — whether picked stock goes back on the
+    shelf, and what happens to money already taken. That is open question Q5,
+    so this refuses rather than inventing an answer.
 
-    Refused, atomically, if any line is short — see OrderNotFillable and
-    check_availability().
+    Cancelling twice is refused too. It would overwrite who cancelled it and
+    when, which is the only record of the decision.
     """
-    if order.status == OrderStatus.CANCELLED:
-        raise OrderCannotBePicked(f"{order.number} is cancelled and cannot be picked.")
-    if order.status in (OrderStatus.PICKED, OrderStatus.SHIPPED):
-        raise OrderCannotBePicked(f"{order.number} has already been picked.")
-
-    from inventory.models import MovementType, StockStatus
-    from inventory.services import average_unit_value, post_movement
-
-    warehouse = order.warehouse
-    rows = check_availability(order)
-    short = [row for row in rows if row["shortfall"] > 0]
-    if short:
-        raise OrderNotFillable(short)
-
-    picked_on = timezone.now().date()
-    for row in rows:
-        sku, quantity = row["sku"], row["needed"]
-        # Recategorised at what the stock is already carried at, the same
-        # reasoning average_unit_value() exists for on a transfer — picking
-        # does not create or destroy value, only where it sits.
-        unit_value = average_unit_value(sku, warehouse)
-
-        post_movement(
-            warehouse=warehouse,
-            sku=sku,
-            quantity=-quantity,
-            movement_type=MovementType.PICK,
-            stock_status=StockStatus.AVAILABLE,
-            unit_value=unit_value,
-            document_number=order.number,
-            occurred_on=picked_on,
-            created_by=picked_by,
-        )
-        post_movement(
-            warehouse=warehouse,
-            sku=sku,
-            quantity=quantity,
-            movement_type=MovementType.PICK,
-            stock_status=StockStatus.PICK,
-            unit_value=unit_value,
-            document_number=order.number,
-            occurred_on=picked_on,
-            created_by=picked_by,
+    if not order.can_be_cancelled:
+        raise CannotCancel(
+            f"{order.number} is {order.get_status_display().lower()} and can no "
+            "longer be cancelled by the school. Only an unpaid order on hold can be."
         )
 
-    order.status = OrderStatus.PICKED
-    order.save(update_fields=["status"])
+    order.status = OrderStatus.CANCELLED
+    order.cancelled_at = timezone.now()
+    order.cancelled_by = cancelled_by
+    order.cancellation_reason = reason.strip()
+    order.save(
+        update_fields=["status", "cancelled_at", "cancelled_by", "cancellation_reason"]
+    )
     return order
+
+
+# ---------------------------------------------------------------------------
+# The invoice — F34
+# ---------------------------------------------------------------------------
+
+
+def invoice_for(order):
+    """The order as a document a school can hand to a parent.
+
+    AsOne's definition (p.2): "created by the system with Uniform Kit # (if
+    used), SKUs and quantities costed for payment". So kit lines are grouped
+    back under the kit the school actually chose, rather than presented as a
+    flat list of garments nobody asked for by name.
+
+    That regrouping is presentation only. The order's lines stay as they are
+    — individual SKUs, which is what the warehouse picks.
+    """
+    kits, loose = {}, []
+
+    for line in order.lines.select_related("sku", "sku__garment", "from_kit"):
+        if line.from_kit is None:
+            loose.append(line)
+            continue
+
+        group = kits.setdefault(
+            line.from_kit_id,
+            {"kit": line.from_kit, "lines": [], "subtotal": 0},
+        )
+        group["lines"].append(line)
+        group["subtotal"] += line.line_total
+
+    return {
+        "kits": sorted(kits.values(), key=lambda g: g["kit"].kit_number),
+        "items": sorted(loose, key=lambda line: line.sku.description),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Reports
+# ---------------------------------------------------------------------------
+
+
+def orders_on_hold(queryset=None):
+    """Invoices raised but not yet paid or released — F53.
+
+    The queue a school works from: what is waiting on a parent to pay. Also
+    what the leads look at to see whether the point of sale is being used.
+
+    Takes a queryset so the caller can scope it first — a school sees its
+    own, the leads see every school.
+    """
+    orders = SchoolOrder.objects.all() if queryset is None else queryset
+
+    return (
+        orders.filter(status=OrderStatus.HOLD)
+        .select_related("school")
+        .prefetch_related("lines")
+        .order_by("order_date", "number")
+    )

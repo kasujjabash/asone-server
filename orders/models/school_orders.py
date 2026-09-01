@@ -87,6 +87,24 @@ class SchoolOrder(models.Model):
     )
     created_at = models.DateTimeField(auto_now_add=True)
 
+    # F36. An order is cancelled, never deleted — the school has handed the
+    # number to a parent, so the document has to survive and say what became
+    # of it. Who cancelled it is recorded for the same reason every other
+    # transaction records a user (p.9).
+    cancelled_at = models.DateTimeField(null=True, blank=True)
+    cancelled_by = models.ForeignKey(
+        "accounts.User",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="+",
+    )
+    cancellation_reason = models.CharField(
+        max_length=200,
+        blank=True,
+        help_text="Why the school cancelled. Optional, but useful when a parent asks.",
+    )
+
     class Meta:
         ordering = ["-order_date", "-number"]
         indexes = [
@@ -109,6 +127,21 @@ class SchoolOrder(models.Model):
         the fact, not something the school chooses here.
         """
         return self.school.primary_warehouse
+
+    @property
+    def is_cancelled(self) -> bool:
+        return self.status == OrderStatus.CANCELLED
+
+    @property
+    def can_be_cancelled(self) -> bool:
+        """Only while it is still on Hold — F36 says "an **unpaid** invoice".
+
+        Once payment is confirmed and the order is released, cancelling
+        raises questions nobody has answered: whether stock already picked
+        goes back, and what happens to money already taken. That is open
+        question Q5, so this refuses rather than guesses.
+        """
+        return self.status == OrderStatus.HOLD
 
     @property
     def total(self):

@@ -10,4 +10,7 @@ app_name = "orders"
 router = DefaultRouter()
 router.register("school-orders", views.SchoolOrderViewSet, "school-order")
 
-urlpatterns = [path("", include(router.urls))]
+urlpatterns = [
+    path("reports/on-hold/", views.OrdersOnHoldView.as_view(), name="orders-on-hold"),
+    path("", include(router.urls)),
+]

@@ -55,6 +55,80 @@ class SkuLineInputSerializer(serializers.Serializer):
     quantity = serializers.IntegerField(min_value=1)
 
 
+class InvoiceKitGroupSerializer(serializers.Serializer):
+    """A kit on the invoice, with the garments it contains beneath it.
+
+    AsOne's definition of an invoice names the kit number "if used", so the
+    school sees the thing it actually chose rather than a flat list of
+    garments it did not ask for by name.
+    """
+
+    kit_number = serializers.CharField(source="kit.kit_number")
+    kit_name = serializers.CharField(source="kit.name")
+    subtotal = serializers.DecimalField(max_digits=14, decimal_places=2)
+    lines = SchoolOrderLineSerializer(many=True)
+
+
+class InvoiceSerializer(serializers.Serializer):
+    """The order as a document — F34.
+
+    Same number as the order: AsOne treats the two as one thing, since the
+    school uses the invoice number and the student's name to hand the right
+    parcel to the right child.
+    """
+
+    number = serializers.CharField(help_text="The invoice number, also the order number.")
+    student_name = serializers.CharField()
+    school_name = serializers.CharField(source="school.name")
+    order_date = serializers.DateField()
+    status = serializers.CharField()
+    status_display = serializers.CharField(source="get_status_display")
+    total = serializers.DecimalField(max_digits=14, decimal_places=2)
+
+    kits = InvoiceKitGroupSerializer(many=True)
+    items = SchoolOrderLineSerializer(many=True, help_text="Ordered individually.")
+
+    cancelled_at = serializers.DateTimeField(allow_null=True)
+    cancellation_reason = serializers.CharField(allow_blank=True)
+
+
+class CancelOrderSerializer(serializers.Serializer):
+    """Withdrawing an unpaid invoice — F36."""
+
+    reason = serializers.CharField(
+        max_length=200,
+        required=False,
+        allow_blank=True,
+        default="",
+        help_text="Why the school cancelled. Optional, but useful when a parent asks.",
+    )
+
+
+class OrderOnHoldSerializer(serializers.ModelSerializer):
+    """One row of the still-on-hold report — F53."""
+
+    school_name = serializers.CharField(source="school.name", read_only=True)
+    total = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
+    line_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = SchoolOrder
+        fields = (
+            "id",
+            "number",
+            "school",
+            "school_name",
+            "student_name",
+            "order_date",
+            "total",
+            "line_count",
+        )
+        read_only_fields = fields
+
+    def get_line_count(self, obj) -> int:
+        return len(obj.lines.all())
+
+
 class SchoolOrderSerializer(serializers.ModelSerializer):
     """An order, reading. Doubles as the invoice — same number, same lines."""
 
@@ -84,6 +158,8 @@ class SchoolOrderSerializer(serializers.ModelSerializer):
             "created_by",
             "created_by_name",
             "created_at",
+            "cancelled_at",
+            "cancellation_reason",
             "lines",
         )
         read_only_fields = (
@@ -93,6 +169,8 @@ class SchoolOrderSerializer(serializers.ModelSerializer):
             "status",
             "created_by",
             "created_at",
+            "cancelled_at",
+            "cancellation_reason",
         )
 
 

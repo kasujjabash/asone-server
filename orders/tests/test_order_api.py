@@ -97,14 +97,27 @@ class OnlySchoolStaffReachThePointOfSale(OrderApiSetup):
                     status.HTTP_403_FORBIDDEN,
                 )
 
-    def test_finance_and_warehouse_staff_may_not(self):
-        for user in (self.finance, self.clerk):
-            with self.subTest(user=user.email):
-                self.client.force_authenticate(user)
-                self.assertEqual(
-                    self.client.get(reverse("orders:school-order-list")).status_code,
-                    status.HTTP_403_FORBIDDEN,
-                )
+    def test_warehouse_staff_may_not(self):
+        self.client.force_authenticate(self.clerk)
+
+        self.assertEqual(
+            self.client.get(reverse("orders:school-order-list")).status_code,
+            status.HTTP_403_FORBIDDEN,
+        )
+
+    def test_finance_may_read_but_not_place(self):
+        """F34 gives Finance a view of the invoice — reading is not acting.
+
+        Narrower than it looks: they can see an order, and can neither place
+        nor cancel one.
+        """
+        self.client.force_authenticate(self.finance)
+
+        self.assertEqual(
+            self.client.get(reverse("orders:school-order-list")).status_code,
+            status.HTTP_200_OK,
+        )
+        self.assertEqual(self.place(user=self.finance).status_code, status.HTTP_403_FORBIDDEN)
 
 
 class ASchoolOrdersOnlyForItself(OrderApiSetup):

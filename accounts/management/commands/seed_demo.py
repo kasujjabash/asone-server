@@ -17,7 +17,7 @@ from datetime import date
 from decimal import Decimal
 
 from accounts.models import User
-from catalog.models import Garment, GarmentPrice, MinimumStockLevel, School, Size, Sku, TailoringCenter, Warehouse
+from catalog.models import Garment, GarmentPrice, Kit, KitItem, MinimumStockLevel, School, Size, Sku, TailoringCenter, Warehouse
 from inventory.models import ReasonCode
 
 #: Known password, printed to the terminal. This is exactly why the command
@@ -55,6 +55,16 @@ GARMENTS = [
 #: Prices run from the start of the 2026 school year so that "price today"
 #: resolves. The 2027 season is what AsOne is actually planning for.
 PRICES_ACTIVE_FROM = date(2026, 1, 1)
+
+#: A starter kit per school level — what a new student needs, and AsOne's
+#: own example of why kits exist. Without one, nothing outside the tests
+#: exercises kit explosion at the point of sale.
+KITS = [
+    ("PS-STARTER-01", "PS Starter Kit", "PS",
+     [("Blue Tunic", 2), ("White Shirt", 2), ("Socks", 3)]),
+    ("HS-STARTER-01", "HS Starter Kit", "HS",
+     [("Grey Trousers", 2), ("White Shirt", 2), ("Socks", 3)]),
+]
 
 #: The four AsOne named on p.3, followed by "May be more…" — so this is a
 #: starting set for Central Office to extend, not the definitive list.
@@ -138,6 +148,7 @@ class Command(BaseCommand):
         )
 
         self._seed_catalog(warehouses)
+        self._seed_kits()
         self._seed_reason_codes()
         self._seed_users(warehouses)
 
@@ -215,6 +226,30 @@ class Command(BaseCommand):
                 )
                 floors += created
         self.stdout.write(f"  {MinimumStockLevel.objects.count()} floors ({floors} new this run)")
+
+    def _seed_kits(self):
+        """A starter kit per school level — F09."""
+        self.stdout.write(self.style.MIGRATE_HEADING("Uniform kits"))
+
+        for number, name, level, components in KITS:
+            kit, created = Kit.objects.get_or_create(
+                kit_number=number, defaults={"name": name, "school_level": level}
+            )
+            verb = self.style.SUCCESS("created") if created else "exists "
+            self.stdout.write(f"  {verb}  {number}  {name}")
+
+            for garment_name, quantity in components:
+                sku = (
+                    Sku.objects.filter(garment__name=garment_name)
+                    .order_by("size__sort_order")
+                    .first()
+                )
+                if sku is None:
+                    self.stdout.write(f"           (no SKU for {garment_name}, skipped)")
+                    continue
+                KitItem.objects.get_or_create(
+                    kit=kit, sku=sku, defaults={"quantity": quantity}
+                )
 
     def _seed_reason_codes(self):
         """Why an inventory adjustment was made — F13.
