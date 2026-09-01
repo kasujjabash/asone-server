@@ -14,16 +14,28 @@ from rest_framework.exceptions import PermissionDenied
 from rest_framework.exceptions import ValidationError as DRFValidationError
 from rest_framework.response import Response
 
-from accounts.permissions import AUTHENTICATED, CanEnterSchoolOrders, scope_to_user_site
+from accounts.permissions import (
+    AUTHENTICATED,
+    CanEnterSchoolOrders,
+    CanReceiveAndShip,
+    scope_to_user_site,
+)
 from catalog.services import PriceNotSet
 
 from . import services
 from .models import SchoolOrder, SchoolOrderLine
 from .serializers import (
+    OrderAvailabilityRowSerializer,
     OrderDemandRowSerializer,
     SchoolOrderSerializer,
     SchoolOrderWriteSerializer,
 )
+
+#: F37, F38, F39 are warehouse fulfilment actions on an order, not the
+#: School Orders Entry column the rest of this viewset belongs to — Bashir,
+#: 30 August 2026: reuse CanReceiveAndShip rather than a new permission
+#: class, since it already covers exactly this.
+_WAREHOUSE_ACTIONS = frozenset({"availability", "pick_list", "pick"})
 
 
 @extend_schema(tags=["Orders — point of sale"])
@@ -42,12 +54,24 @@ class SchoolOrderViewSet(viewsets.ModelViewSet):
     **Orders are never deleted.** A school hands the number to a parent as
     an invoice, so the document has to survive. Cancelling is the way out —
     which is F36 and not built yet.
+
+    `availability`, `pick_list` and `pick` (F37, F38, F39) are the warehouse
+    fulfilment actions on the same order — gated by `CanReceiveAndShip`
+    instead, via `get_permissions()`, since they are a different matrix
+    column from everything else on this viewset.
     """
 
     permission_classes = [*AUTHENTICATED, CanEnterSchoolOrders]
     filterset_fields = ("status", "order_date")
     search_fields = ("number", "student_name")
     http_method_names = ["get", "post", "patch", "head", "options"]
+
+    def get_permissions(self):
+        # availability/pick_list/pick are warehouse fulfilment, not the
+        # School Orders Entry column the rest of this viewset guards.
+        if self.action in _WAREHOUSE_ACTIONS:
+            return [permission() for permission in [*AUTHENTICATED, CanReceiveAndShip]]
+        return super().get_permissions()
 
     def get_queryset(self):
         queryset = SchoolOrder.objects.select_related(
@@ -60,7 +84,16 @@ class SchoolOrderViewSet(viewsets.ModelViewSet):
                 ),
             )
         )
-        return scope_to_user_site(queryset, self.request.user, school_field="school")
+        # school_field for School Staff (their own school's orders);
+        # warehouse_field for Warehouse Staff reaching availability/
+        # pick_list/pick — without both, a warehouse clerk's requests would
+        # pass CanReceiveAndShip and then find an empty queryset.
+        return scope_to_user_site(
+            queryset,
+            self.request.user,
+            school_field="school",
+            warehouse_field="school__primary_warehouse",
+        )
 
     def get_serializer_class(self):
         return SchoolOrderWriteSerializer if self.action == "create" else SchoolOrderSerializer
@@ -139,3 +172,69 @@ class SchoolOrderViewSet(viewsets.ModelViewSet):
             for sku, quantity in services.order_demand(order)
         ]
         return Response(OrderDemandRowSerializer(rows, many=True).data)
+
+    @extend_schema(
+        summary="Can the warehouse fill this order — F37",
+        responses=OrderAvailabilityRowSerializer(many=True),
+        description=(
+            "One row per SKU: how many the order needs, how many are "
+            "AVAILABLE at the order's warehouse, and the shortfall (0 means "
+            "that line can be filled).\n\n"
+            "Read-only — checking does not reserve anything. Post to "
+            "`pick/` to actually reserve stock; that action refuses using "
+            "this exact same comparison, so the two can never disagree."
+        ),
+    )
+    @action(detail=True, methods=["get"])
+    def availability(self, request, pk=None):
+        order = self.get_object()
+        rows = services.check_availability(order)
+        return Response(OrderAvailabilityRowSerializer(rows, many=True).data)
+
+    @extend_schema(
+        summary="Pick list for the warehouse — F38",
+        responses=OrderDemandRowSerializer(many=True),
+        description=(
+            "Same data as `demand/`, in the same description order — "
+            "printed as the sheet a warehouse works from, reachable by "
+            "warehouse roles rather than the school that placed the order."
+        ),
+    )
+    @action(detail=True, methods=["get"], url_path="pick-list")
+    def pick_list(self, request, pk=None):
+        order = self.get_object()
+        rows = [
+            {
+                "sku_number": sku.number,
+                "sku_description": sku.description,
+                "quantity": quantity,
+            }
+            for sku, quantity in services.order_demand(order)
+        ]
+        return Response(OrderDemandRowSerializer(rows, many=True).data)
+
+    @extend_schema(
+        summary="Pick this order — F39",
+        request=None,
+        responses={200: SchoolOrderSerializer},
+        description=(
+            "Reserves stock for every line: Available -> Pick. Total stock "
+            "at the warehouse is unchanged; what changes is how much of it "
+            "is still free to promise to a different order.\n\n"
+            "Refused if the order is cancelled or already picked/shipped, "
+            "or if any line is short — check `availability/` first."
+        ),
+    )
+    @action(detail=True, methods=["post"])
+    def pick(self, request, pk=None):
+        order = self.get_object()
+
+        try:
+            services.pick_order(order, picked_by=request.user)
+        except services.OrderCannotBePicked as exc:
+            raise DRFValidationError({"detail": str(exc)}) from exc
+        except services.OrderNotFillable as exc:
+            raise DRFValidationError({"detail": str(exc)}) from exc
+
+        order.refresh_from_db()
+        return Response(SchoolOrderSerializer(order).data)
