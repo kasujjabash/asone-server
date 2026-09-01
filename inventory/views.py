@@ -41,6 +41,7 @@ from .models import (
     WarehouseTransferLine,
 )
 from .serializers import (
+    CountCorrectionSerializer,
     InventoryAdjustmentSerializer,
     InventoryAdjustmentWriteSerializer,
     ReasonCodeSerializer,
@@ -312,12 +313,17 @@ class WarehouseTransferViewSet(viewsets.ModelViewSet):
 class InventoryAdjustmentViewSet(viewsets.ModelViewSet):
     """A quantity change against a reason code — F23.
 
-    The generic shape the rest of Phase 2 reuses: physical count
-    corrections (F24), returns (F26) and damages (F27) are all this same
-    document, just posted with a different reason code — `CORR_UP`/
-    `CORR_DOWN`, `RET`, `DMG` respectively. None of the three needed a new
-    model, serializer or endpoint; see test_returns_and_damages.py and
-    test_correction_codes.py for the proof, not just the claim.
+    The generic shape the rest of Phase 2 reuses. Returns (F26) and damages
+    (F27) are this same document posted with a different reason code — RET
+    or DMG — and needed no new code; see test_returns_and_damages.py for the
+    proof.
+
+    Physical count correction (F24) is *not* just another reason code: F24's
+    actual requirement is that the system compares a count to what it
+    already thinks is on hand and posts the difference itself, rather than
+    asking whoever is counting to do that subtraction and pick CORR_UP or
+    CORR_DOWN by hand. See the `correct_count` action below, and
+    services.correct_count().
 
     Finance only, for both reading and writing — unlike most master data,
     this is not routed through MasterDataAccess. AsOne's "Inventory Adj"
@@ -398,3 +404,45 @@ class InventoryAdjustmentViewSet(viewsets.ModelViewSet):
 
         adjustment.refresh_from_db()
         return Response(InventoryAdjustmentSerializer(adjustment).data)
+
+    @extend_schema(
+        summary="Correct a physical count — F24",
+        request=CountCorrectionSerializer,
+        responses={200: InventoryAdjustmentSerializer, 201: InventoryAdjustmentSerializer},
+        description=(
+            "Compares what was actually counted to what the system thinks "
+            "is on hand, and posts the difference — the comparison is done "
+            "here, not by whoever is counting.\n\n"
+            "**201** if the count differed and a CORR_UP/CORR_DOWN "
+            "adjustment was posted immediately (not left as an unposted "
+            "draft, unlike the rest of this endpoint). **200** with "
+            "`adjustment: null` if the count matched exactly — nothing to "
+            "correct, and nothing gets written for it.\n\n"
+            "Refused if the SKU has no catalog price on the count date, or "
+            "if the count is short and short of what is actually on hand "
+            "(should not happen — the comparison is against the same "
+            "figure — but re-checked anyway, same as everywhere else)."
+        ),
+    )
+    @action(detail=False, methods=["post"], url_path="correct-count")
+    def correct_count(self, request):
+        serializer = CountCorrectionSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        try:
+            adjustment = services.correct_count(
+                created_by=request.user, **serializer.validated_data
+            )
+        except services.NotEnoughStock as exc:
+            raise DRFValidationError({"counted_quantity": str(exc)}) from exc
+        except PriceNotSet as exc:
+            raise DRFValidationError({"sku": str(exc)}) from exc
+
+        if adjustment is None:
+            return Response(
+                {"adjustment": None, "detail": "The count matches the system. Nothing to correct."}
+            )
+
+        return Response(
+            InventoryAdjustmentSerializer(adjustment).data, status=status.HTTP_201_CREATED
+        )

@@ -5,7 +5,7 @@ being posted, later an adjustment — never by a client sending a movement.
 """
 
 from config.validators import CaseInsensitiveUniqueValidator
-from catalog.models import Sku
+from catalog.models import Sku, Warehouse
 from rest_framework import serializers
 
 from .models import (
@@ -275,3 +275,25 @@ class InventoryAdjustmentWriteSerializer(serializers.ModelSerializer):
                 }
             )
         return attrs
+
+
+# ---------------------------------------------------------------------------
+# Physical count correction — F24
+# ---------------------------------------------------------------------------
+
+
+class CountCorrectionSerializer(serializers.Serializer):
+    """Input for F24: what was actually counted, nothing else.
+
+    No quantity-and-direction fields here — that comparison is the whole
+    point of F24, and it happens in services.correct_count(), not from
+    anything the caller supplies.
+    """
+
+    warehouse = serializers.PrimaryKeyRelatedField(queryset=Warehouse.objects.all())
+    sku = serializers.PrimaryKeyRelatedField(queryset=Sku.objects.all())
+    counted_quantity = serializers.IntegerField(
+        min_value=0, help_text="What was actually found on the shelf."
+    )
+    adjustment_date = serializers.DateField(help_text="The date the count was taken.")
+    notes = serializers.CharField(required=False, allow_blank=True, default="")
