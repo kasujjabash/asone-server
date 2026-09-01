@@ -21,7 +21,12 @@ from accounts.tests.factories import build_sites, make_user
 from catalog.models import Garment, GarmentPrice, Size, Sku
 from catalog.services import PriceNotSet
 from inventory.models import InventoryAdjustment, MovementType, ReasonCode
-from inventory.services import correct_count, post_movement, stock_level
+from inventory.services import (
+    CorrectionReasonCodeMissing,
+    correct_count,
+    post_movement,
+    stock_level,
+)
 
 Role = User.Role
 COUNTED_ON = date(2026, 11, 1)
@@ -195,6 +200,67 @@ class CorrectingAnUnpricedSku(CountCorrectionSetup):
             )
 
 
+class MissingOrRetiredCorrectionCodes(CountCorrectionSetup):
+    """Bashir, 2 September 2026: a raw ReasonCode.DoesNotExist would surface
+    as a 500 on a fresh deployment that only ran migrations — seed_demo is
+    what quietly makes this work in development. A retired code must not be
+    used either: retirement is supposed to mean "not choosable", and a
+    system-selected code is still a selection."""
+
+    def test_a_missing_corr_up_is_a_clear_error_not_a_500(self):
+        ReasonCode.objects.filter(code="CORR_UP").delete()
+
+        with self.assertRaises(CorrectionReasonCodeMissing):
+            correct_count(
+                warehouse=self.warehouse,
+                sku=self.sku,
+                counted_quantity=20,  # higher than the system's 0 -> CORR_UP
+                adjustment_date=COUNTED_ON,
+                created_by=self.finance,
+            )
+
+    def test_a_missing_corr_down_is_a_clear_error_not_a_500(self):
+        self.stock_in(20)
+        ReasonCode.objects.filter(code="CORR_DOWN").delete()
+
+        with self.assertRaises(CorrectionReasonCodeMissing):
+            correct_count(
+                warehouse=self.warehouse,
+                sku=self.sku,
+                counted_quantity=5,  # lower than the system's 20 -> CORR_DOWN
+                adjustment_date=COUNTED_ON,
+                created_by=self.finance,
+            )
+
+    def test_a_retired_corr_up_is_not_used(self):
+        ReasonCode.objects.filter(code="CORR_UP").update(is_active=False)
+
+        with self.assertRaises(CorrectionReasonCodeMissing):
+            correct_count(
+                warehouse=self.warehouse,
+                sku=self.sku,
+                counted_quantity=20,
+                adjustment_date=COUNTED_ON,
+                created_by=self.finance,
+            )
+
+    def test_no_adjustment_is_written_when_the_code_is_missing(self):
+        ReasonCode.objects.filter(code="CORR_UP").delete()
+
+        try:
+            correct_count(
+                warehouse=self.warehouse,
+                sku=self.sku,
+                counted_quantity=20,
+                adjustment_date=COUNTED_ON,
+                created_by=self.finance,
+            )
+        except CorrectionReasonCodeMissing:
+            pass
+
+        self.assertEqual(InventoryAdjustment.objects.count(), 0)
+
+
 class CountCorrectionApi(APITestCase):
     """Finance only, same as the rest of F23 — see InventoryAdjustmentApi
     for the exhaustive per-role check; this confirms the new action inherits
@@ -273,3 +339,12 @@ class CountCorrectionApi(APITestCase):
         response = self.correct(520)
 
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_a_missing_reason_code_is_a_400_not_a_500(self):
+        ReasonCode.objects.filter(code="CORR_UP").delete()
+        self.client.force_authenticate(self.finance)
+
+        response = self.correct(520)
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("detail", response.data)

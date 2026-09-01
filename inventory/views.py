@@ -418,10 +418,12 @@ class InventoryAdjustmentViewSet(viewsets.ModelViewSet):
             "draft, unlike the rest of this endpoint). **200** with "
             "`adjustment: null` if the count matched exactly — nothing to "
             "correct, and nothing gets written for it.\n\n"
-            "Refused if the SKU has no catalog price on the count date, or "
-            "if the count is short and short of what is actually on hand "
-            "(should not happen — the comparison is against the same "
-            "figure — but re-checked anyway, same as everywhere else)."
+            "Refused if the SKU has no catalog price on the count date, if "
+            "the count is short of what is actually on hand (should not "
+            "happen — the comparison is against the same figure — but "
+            "re-checked anyway, same as everywhere else), or if the "
+            "CORR_UP/CORR_DOWN reason code this direction needs does not "
+            "exist or has been retired."
         ),
     )
     @action(detail=False, methods=["post"], url_path="correct-count")
@@ -435,6 +437,8 @@ class InventoryAdjustmentViewSet(viewsets.ModelViewSet):
             )
         except services.NotEnoughStock as exc:
             raise DRFValidationError({"counted_quantity": str(exc)}) from exc
+        except services.CorrectionReasonCodeMissing as exc:
+            raise DRFValidationError({"detail": str(exc)}) from exc
         except PriceNotSet as exc:
             raise DRFValidationError({"sku": str(exc)}) from exc
 

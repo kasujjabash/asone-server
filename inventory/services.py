@@ -521,6 +521,32 @@ def post_adjustment(adjustment, *, posted_by):
 # ---------------------------------------------------------------------------
 
 
+class CorrectionReasonCodeMissing(Exception):
+    """CORR_UP or CORR_DOWN does not exist, or has been retired.
+
+    Raised rather than letting ReasonCode.DoesNotExist surface as a 500.
+    Bashir, 2 September 2026: dev never notices this because seed_demo
+    creates both codes, but a fresh deployment that only runs migrations
+    has neither — and there is nothing a caller did wrong to point a plain
+    validation message at except "Central Office has not set this up yet".
+
+    Also raised for a **retired** code, not just a missing one: retiring a
+    code is supposed to mean "cannot be chosen for new adjustments", and a
+    system-selected code is still a selection. Silently using a retired
+    CORR_DOWN because `.get()` did not check `is_active` would make
+    retirement a lie for exactly the one path a human never explicitly
+    chooses the code for.
+    """
+
+    def __init__(self, code):
+        self.code = code
+        super().__init__(
+            f'The "{code}" reason code does not exist or has been retired. '
+            "Central Office must create or reactivate it before a physical "
+            "count can be corrected in this direction."
+        )
+
+
 @transaction.atomic
 def correct_count(*, warehouse, sku, counted_quantity, adjustment_date, created_by, notes=""):
     """Compare a physical count to what the system thinks is on hand, and
@@ -540,6 +566,9 @@ def correct_count(*, warehouse, sku, counted_quantity, adjustment_date, created_
     system exactly. A match is not an error — it is the expected, ordinary
     outcome of most counts — so nothing is written for it: there is no such
     thing as a zero-quantity adjustment (see adjustment_quantity_is_positive).
+
+    Raises CorrectionReasonCodeMissing if the code this direction needs does
+    not exist or has been retired.
     """
     system_level = stock_level(sku, warehouse, as_of=adjustment_date)
     difference = counted_quantity - system_level
@@ -547,9 +576,11 @@ def correct_count(*, warehouse, sku, counted_quantity, adjustment_date, created_
     if difference == 0:
         return None
 
-    reason_code = ReasonCode.objects.get(
-        code="CORR_UP" if difference > 0 else "CORR_DOWN"
-    )
+    code = "CORR_UP" if difference > 0 else "CORR_DOWN"
+    try:
+        reason_code = ReasonCode.objects.get(code=code, is_active=True)
+    except ReasonCode.DoesNotExist:
+        raise CorrectionReasonCodeMissing(code) from None
 
     adjustment = create_adjustment(
         warehouse=warehouse,
