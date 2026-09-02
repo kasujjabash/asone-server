@@ -297,3 +297,20 @@ class CountCorrectionSerializer(serializers.Serializer):
     )
     adjustment_date = serializers.DateField(help_text="The date the count was taken.")
     notes = serializers.CharField(required=False, allow_blank=True, default="")
+
+
+class CostedAdjustmentSerializer(serializers.Serializer):
+    """One reason code's effect on the value of stock — F58.
+
+    `value` is signed the way the ledger is: negative where stock left,
+    positive where it came back, so the rows sum to the net effect.
+    """
+
+    reason_code = serializers.CharField()
+    reason_name = serializers.CharField()
+    adjustments = serializers.IntegerField(help_text="How many adjustments were posted.")
+    units = serializers.IntegerField(help_text="Net units, signed.")
+    value = serializers.DecimalField(max_digits=18, decimal_places=2)
+    treatment = serializers.CharField(
+        help_text="How this is treated financially. Unanswered until AsOne settles question Q6."
+    )

@@ -16,5 +16,10 @@ router.register("adjustments", views.InventoryAdjustmentViewSet, "adjustment")
 urlpatterns = [
     path("stock-levels/", views.StockLevelView.as_view(), name="stock-levels"),
     path("reorder-alerts/", views.ReorderAlertView.as_view(), name="reorder-alerts"),
+    path(
+        "reports/adjustments-costed/",
+        views.CostedAdjustmentsView.as_view(),
+        name="adjustments-costed",
+    ),
     path("", include(router.urls)),
 ]

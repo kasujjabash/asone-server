@@ -32,7 +32,7 @@ from accounts.permissions import (
 from catalog.models import Warehouse
 from catalog.services import PriceNotSet
 
-from . import services
+from . import reports, services
 from .models import (
     InventoryAdjustment,
     ReasonCode,
@@ -41,6 +41,7 @@ from .models import (
     WarehouseTransferLine,
 )
 from .serializers import (
+    CostedAdjustmentSerializer,
     CountCorrectionSerializer,
     InventoryAdjustmentSerializer,
     InventoryAdjustmentWriteSerializer,
@@ -66,6 +67,24 @@ def _as_of(request):
     except ValueError:
         raise DRFValidationError(
             {"as_of": f"'{raw}' is not a date. Use YYYY-MM-DD."}
+        ) from None
+
+
+def _date_param(request, name):
+    """Read a `YYYY-MM-DD` query parameter, or None.
+
+    Same refusal as `_as_of`: a date that will not parse is a 400 naming the
+    parameter, never a silently ignored filter — a report quietly covering
+    all time because someone typed "01/09/2026" is worse than an error.
+    """
+    raw = request.query_params.get(name)
+    if not raw:
+        return None
+    try:
+        return date.fromisoformat(raw)
+    except ValueError:
+        raise DRFValidationError(
+            {name: f"'{raw}' is not a date. Use YYYY-MM-DD."}
         ) from None
 
 
@@ -470,3 +489,43 @@ class InventoryAdjustmentViewSet(viewsets.ModelViewSet):
         return Response(
             InventoryAdjustmentSerializer(adjustment).data, status=status.HTTP_201_CREATED
         )
+
+
+@extend_schema(
+    tags=["Inventory"],
+    summary="Adjustments, costed",
+    parameters=[
+        OpenApiParameter("from", str, description="Inclusive start date, YYYY-MM-DD."),
+        OpenApiParameter("to", str, description="Inclusive end date, YYYY-MM-DD."),
+        OpenApiParameter("warehouse", int, description="Limit to one warehouse."),
+    ],
+    responses=CostedAdjustmentSerializer(many=True),
+    description=(
+        "F58 — what adjustments did to the value of stock, by reason code.\n\n"
+        "Counted from the **ledger**, not from adjustment documents: an "
+        "adjustment created and never posted has moved nothing and is "
+        "correctly absent. Value is signed the way the ledger is, so the "
+        "rows sum to the net effect on the value of stock.\n\n"
+        "**Open question Q6.** AsOne's p.6 marks the financial treatment of "
+        "damaged stock \"To be determined\", so every row's `treatment` "
+        "currently reads \"not yet classified\". The operational figures — "
+        "units and value — are complete and do not depend on that answer. "
+        "See `FINANCIAL_TREATMENT` in `inventory/reports.py`."
+    ),
+)
+class CostedAdjustmentsView(APIView):
+    """F58. Finance and the leads — the same audience as the other costed
+    reports, since this is a money question rather than a warehouse one."""
+
+    permission_classes = [*AUTHENTICATED, MasterDataAccess]
+    read_roles = (Role.FINANCE,)
+
+    def get(self, request):
+        warehouse = _warehouse(request)
+
+        rows = reports.adjustments_costed(
+            date_from=_date_param(request, "from"),
+            date_to=_date_param(request, "to"),
+            warehouse=warehouse,
+        )
+        return Response(CostedAdjustmentSerializer(rows, many=True).data)

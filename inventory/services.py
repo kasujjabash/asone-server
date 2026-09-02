@@ -254,7 +254,7 @@ class NotEnoughStock(Exception):
         super().__init__(f"Not enough stock at the source warehouse: {listed}.")
 
 
-def average_unit_value(sku, warehouse, as_of=None):
+def average_unit_value(sku, warehouse, as_of=None, stock_status=StockStatus.AVAILABLE):
     """What one unit of ``sku`` at ``warehouse`` is currently carried at.
 
     Total value divided by units on hand, taken from the ledger. Used to
@@ -262,10 +262,17 @@ def average_unit_value(sku, warehouse, as_of=None):
     the other — which is what makes "no money moves" (p.6) true rather than
     merely intended.
 
-    Returns None when nothing is on hand; there is no value to carry across,
-    and the transfer will be refused for lack of stock anyway.
+    ``stock_status`` defaults to AVAILABLE, which is what a transfer and a
+    pick both mean. Shipping needs PICK instead: by then the units have left
+    AVAILABLE, and asking for the available average would return None for a
+    warehouse that picked its whole shelf — Bashir, 2 September 2026.
+
+    Returns None when nothing is on hand in that status; there is no value
+    to carry across, and the caller refuses for lack of stock anyway.
     """
-    row = _ledger(warehouse=warehouse, sku=sku, as_of=as_of).aggregate(
+    row = _ledger(
+        warehouse=warehouse, sku=sku, as_of=as_of, stock_status=stock_status
+    ).aggregate(
         level=Coalesce(Sum("quantity"), Value(0), output_field=IntegerField()),
         value=Coalesce(
             Sum(F("quantity") * F("unit_value"), output_field=MONEY),

@@ -31,9 +31,12 @@ class OrderStatus(models.TextChoices):
     """Where an order is in its life — p.7 and p.8.
 
     Hold and Cancelled come from the point of sale; the rest are what the
-    warehouse does with it. Only HOLD and CANCELLED are reachable today:
-    releasing an order depends on payment confirmation, and what confirms
-    payment is open question Q2 ("School Monitor").
+    warehouse does with it.
+
+    RELEASED means payment has been confirmed. *What* confirms it is still
+    open question Q2 ("School Monitor") — but that question decides who
+    calls `release_order()`, not what releasing means, so the status is
+    reachable and the unknown lives in one permission class.
     """
 
     HOLD = "HOLD", "On hold — awaiting payment"
@@ -105,6 +108,28 @@ class SchoolOrder(models.Model):
         help_text="Why the school cancelled. Optional, but useful when a parent asks.",
     )
 
+    # F35. Payment confirmed, so the warehouse may act on it. What confirms
+    # payment is open question Q2 ("School Monitor") — that question decides
+    # *who or what* calls this, not what happens when it does, so the fields
+    # are the same whichever way AsOne answers. The seam is the permission
+    # class `CanConfirmPayment`, not this model.
+    released_at = models.DateTimeField(null=True, blank=True)
+    released_by = models.ForeignKey(
+        "accounts.User",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="+",
+    )
+    payment_reference = models.CharField(
+        max_length=100,
+        blank=True,
+        help_text=(
+            "Whatever identifies the payment — a receipt number, a mobile "
+            "money reference. Free text until AsOne says what School Monitor is."
+        ),
+    )
+
     class Meta:
         ordering = ["-order_date", "-number"]
         indexes = [
@@ -140,6 +165,20 @@ class SchoolOrder(models.Model):
         raises questions nobody has answered: whether stock already picked
         goes back, and what happens to money already taken. That is open
         question Q5, so this refuses rather than guesses.
+        """
+        return self.status == OrderStatus.HOLD
+
+    @property
+    def is_released(self) -> bool:
+        return self.released_at is not None
+
+    @property
+    def can_be_released(self) -> bool:
+        """Only from Hold — F35.
+
+        Releasing a cancelled order would resurrect a document the school
+        withdrew; releasing one already picked or shipped would restate
+        history. Both are refused rather than tolerated.
         """
         return self.status == OrderStatus.HOLD
 

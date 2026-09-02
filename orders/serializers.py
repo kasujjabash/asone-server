@@ -8,9 +8,9 @@ answer different questions.
 
 from rest_framework import serializers
 
-from catalog.models import Kit, Sku
+from catalog.models import Kit, Sku, Warehouse
 
-from .models import SchoolOrder, SchoolOrderLine
+from .models import Backorder, SchoolOrder, SchoolOrderLine, Shipment, ShipmentLine
 
 
 class SchoolOrderLineSerializer(serializers.ModelSerializer):
@@ -104,6 +104,85 @@ class CancelOrderSerializer(serializers.Serializer):
     )
 
 
+class ReleaseOrderSerializer(serializers.Serializer):
+    """Confirming payment on an order — F35.
+
+    `payment_reference` is free text because we do not yet know what the
+    real one looks like: what confirms payment is open question Q2.
+    """
+
+    payment_reference = serializers.CharField(
+        max_length=100,
+        required=False,
+        allow_blank=True,
+        default="",
+        help_text="Receipt number, mobile money reference — whatever identifies the payment.",
+    )
+
+
+class ShipmentLineSerializer(serializers.ModelSerializer):
+    sku_number = serializers.CharField(source="sku.number", read_only=True)
+    sku_description = serializers.CharField(source="sku.description", read_only=True)
+
+    class Meta:
+        model = ShipmentLine
+        fields = ("id", "sku", "sku_number", "sku_description", "quantity")
+
+
+class ShipmentSerializer(serializers.ModelSerializer):
+    """What left a warehouse — F41."""
+
+    from_warehouse_name = serializers.CharField(
+        source="from_warehouse.name", read_only=True
+    )
+    order_number = serializers.CharField(source="order.number", read_only=True)
+    shipped_by_name = serializers.CharField(
+        source="shipped_by.get_full_name", read_only=True
+    )
+    lines = ShipmentLineSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = Shipment
+        fields = (
+            "id",
+            "number",
+            "order",
+            "order_number",
+            "from_warehouse",
+            "from_warehouse_name",
+            "shipped_on",
+            "shipped_by",
+            "shipped_by_name",
+            "waybill_number",
+            "notes",
+            "lines",
+        )
+        read_only_fields = fields
+
+
+class ShipOrderSerializer(serializers.Serializer):
+    """Sending a picked order out — F41.
+
+    `from_warehouse` is optional and defaults to the order's own. It exists
+    because decision D2 lets a backorder ship direct from whichever
+    warehouse actually filled it.
+    """
+
+    from_warehouse = serializers.PrimaryKeyRelatedField(
+        queryset=Warehouse.objects.all(),
+        required=False,
+        allow_null=True,
+        help_text="Defaults to the school's own warehouse. Set for a backorder filled elsewhere.",
+    )
+    shipped_on = serializers.DateField(
+        required=False, help_text="Defaults to today."
+    )
+    waybill_number = serializers.CharField(
+        max_length=50, required=False, allow_blank=True, default=""
+    )
+    notes = serializers.CharField(required=False, allow_blank=True, default="")
+
+
 class OrderOnHoldSerializer(serializers.ModelSerializer):
     """One row of the still-on-hold report — F53."""
 
@@ -160,6 +239,8 @@ class SchoolOrderSerializer(serializers.ModelSerializer):
             "created_at",
             "cancelled_at",
             "cancellation_reason",
+            "released_at",
+            "payment_reference",
             "lines",
         )
         read_only_fields = (
@@ -171,6 +252,8 @@ class SchoolOrderSerializer(serializers.ModelSerializer):
             "created_at",
             "cancelled_at",
             "cancellation_reason",
+            "released_at",
+            "payment_reference",
         )
 
 
@@ -227,4 +310,111 @@ class OrderAvailabilityRowSerializer(serializers.Serializer):
     available = serializers.IntegerField()
     shortfall = serializers.IntegerField(
         help_text="How many short. Zero means this line can be filled."
+    )
+
+
+class BackorderSerializer(serializers.ModelSerializer):
+    """What a school is still owed — F44."""
+
+    order_number = serializers.CharField(source="order.number", read_only=True)
+    school_name = serializers.CharField(source="order.school.name", read_only=True)
+    student_name = serializers.CharField(source="order.student_name", read_only=True)
+    sku_number = serializers.CharField(source="sku.number", read_only=True)
+    sku_description = serializers.CharField(source="sku.description", read_only=True)
+    status_display = serializers.CharField(source="get_status_display", read_only=True)
+    origin_warehouse_name = serializers.CharField(
+        source="order.school.primary_warehouse.name",
+        read_only=True,
+        help_text="The warehouse that ran short.",
+    )
+    filled_by_warehouse_name = serializers.CharField(
+        source="filled_by_warehouse.name", read_only=True, default=None
+    )
+
+    class Meta:
+        model = Backorder
+        fields = (
+            "id", "order", "order_number", "school_name", "student_name",
+            "sku", "sku_number", "sku_description", "quantity",
+            "status", "status_display",
+            "origin_warehouse_name",
+            "filled_by_warehouse", "filled_by_warehouse_name",
+            "assigned_at", "created_at", "notes",
+        )
+        read_only_fields = fields
+
+
+class AssignBackorderSerializer(serializers.Serializer):
+    """Handing a backorder to a warehouse that has the stock — F45."""
+
+    warehouse = serializers.PrimaryKeyRelatedField(
+        queryset=Warehouse.objects.all(),
+        help_text="A warehouse holding enough to fill it — never the one that ran short.",
+    )
+
+
+class FillBackorderSerializer(serializers.Serializer):
+    """The assigned warehouse shipping direct to the school — F46."""
+
+    shipped_on = serializers.DateField(required=False, help_text="Defaults to today.")
+    waybill_number = serializers.CharField(
+        max_length=50, required=False, allow_blank=True, default=""
+    )
+    notes = serializers.CharField(required=False, allow_blank=True, default="")
+
+
+class PackingListLineSerializer(serializers.Serializer):
+    sku_number = serializers.CharField()
+    description = serializers.CharField()
+    quantity = serializers.IntegerField()
+
+
+class PackingListSerializer(serializers.Serializer):
+    """The document that travels with the goods — F40."""
+
+    shipment_number = serializers.CharField()
+    shipped_on = serializers.DateField()
+    waybill_number = serializers.CharField()
+    from_warehouse = serializers.CharField()
+    invoice_number = serializers.CharField(
+        help_text="The order number. Used with the student's name to hand over the parcel."
+    )
+    student_name = serializers.CharField()
+    school = serializers.CharField()
+    school_address = serializers.CharField()
+    is_direct_from_another_warehouse = serializers.BooleanField(
+        help_text="True for a backorder filled elsewhere and shipped direct (D2)."
+    )
+    lines = PackingListLineSerializer(many=True)
+    total_units = serializers.IntegerField()
+
+
+class PartProcessedOrderSerializer(serializers.ModelSerializer):
+    """An order picked but not yet despatched — F52, F54."""
+
+    school_name = serializers.CharField(source="school.name", read_only=True)
+    warehouse_name = serializers.CharField(
+        source="school.primary_warehouse.name", read_only=True
+    )
+    total = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
+
+    class Meta:
+        model = SchoolOrder
+        fields = (
+            "id", "number", "school", "school_name", "warehouse_name",
+            "student_name", "order_date", "status", "total",
+        )
+        read_only_fields = fields
+
+
+class CostedShipmentSerializer(serializers.Serializer):
+    """What went to a school and what it was worth — F57."""
+
+    school_id = serializers.IntegerField(source="shipment__order__school_id")
+    school_name = serializers.CharField(source="shipment__order__school__name")
+    shipments = serializers.IntegerField()
+    units = serializers.IntegerField()
+    value = serializers.DecimalField(
+        max_digits=18, decimal_places=2,
+        help_text="Valued at what the school was charged, snapshotted when the order was placed.",
     )

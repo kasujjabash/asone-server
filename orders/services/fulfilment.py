@@ -43,6 +43,24 @@ class OrderCannotBePicked(Exception):
     """The order's own status rules out picking it."""
 
 
+#: Must an order be paid for before the warehouse may pick it?
+#:
+#: **This is a placeholder for open question Q2, not a decision.** AsOne's
+#: chart puts payment before fulfilment, so the honest answer is almost
+#: certainly True — but nothing could reach RELEASED when this code was
+#: written, and requiring it would have made F39 unreachable.
+#:
+#: `release_order()` now exists, so flipping this to True is a one-line
+#: change. It is left False because doing so silently is worse than leaving
+#: it: turning it on refuses picking for every order placed before the
+#: release step existed, including everything `seed_scenario` creates.
+#:
+#: To turn it on: set True, then decide what happens to orders already on
+#: Hold. Both branches are covered in
+#: `orders/tests/test_release.py::PickingAndTheReleaseGate`.
+REQUIRE_RELEASE_BEFORE_PICK = False
+
+
 def check_availability(order):
     """F37 — can the warehouse actually fill this order right now.
 
@@ -80,17 +98,22 @@ def pick_order(order, *, picked_by):
     separate reservations table: recategorise, the same shape a transfer
     uses between warehouses, here between statuses at one.
 
-    Refused if the order is cancelled or already picked/shipped. Deliberately
-    **not** gated on OrderStatus.RELEASED: nothing in this codebase can reach
-    that status yet — releasing depends on payment confirmation, open
-    question Q2 — so requiring it here would make F39 permanently
-    unreachable. Revisit once Q2 is settled.
+    Refused if the order is cancelled or already picked/shipped.
+
+    Whether it is also refused for an order nobody has paid for is
+    `REQUIRE_RELEASE_BEFORE_PICK` above — see that comment. It is off, which
+    is the behaviour this function has always had.
 
     Refused, atomically, if any line is short — see OrderNotFillable and
     check_availability().
     """
     if order.status == OrderStatus.CANCELLED:
         raise OrderCannotBePicked(f"{order.number} is cancelled and cannot be picked.")
+    if REQUIRE_RELEASE_BEFORE_PICK and order.status == OrderStatus.HOLD:
+        raise OrderCannotBePicked(
+            f"{order.number} has not been paid for. An order must be released "
+            "before the warehouse picks it."
+        )
     if order.status in (OrderStatus.PICKED, OrderStatus.SHIPPED):
         raise OrderCannotBePicked(f"{order.number} has already been picked.")
 

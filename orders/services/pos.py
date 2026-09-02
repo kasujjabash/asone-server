@@ -66,6 +66,10 @@ class CannotCancel(Exception):
     """The order has moved past the point where a school may withdraw it."""
 
 
+class CannotRelease(Exception):
+    """The order is not on Hold, so there is nothing to release."""
+
+
 class WrongSchoolLevel(Exception):
     """A Primary school ordering a High School kit, or the reverse.
 
@@ -311,6 +315,58 @@ def cancel_order(order, *, cancelled_by, reason=""):
     order.cancellation_reason = reason.strip()
     order.save(
         update_fields=["status", "cancelled_at", "cancelled_by", "cancellation_reason"]
+    )
+    return order
+
+
+# ---------------------------------------------------------------------------
+# Releasing — F35
+# ---------------------------------------------------------------------------
+
+
+@transaction.atomic
+def release_order(order, *, released_by, payment_reference=""):
+    """Confirm payment and hand the order to the warehouse — F35.
+
+    ## The open question, and why this exists anyway
+
+    AsOne's Phase 3 chart shows an order waiting on Hold until "School
+    Monitor" confirms the invoice is paid, and nobody has told us what
+    School Monitor is — a person, a spreadsheet, or another system. That is
+    open question Q2.
+
+    What that answer changes is **who calls this**. It does not change what
+    releasing an order means: payment is confirmed, the document records who
+    confirmed it and when, and the warehouse may now act on it. So the
+    transition is built, and the unknown is isolated in exactly one place —
+    the `CanConfirmPayment` permission class in `orders/permissions.py`.
+
+    When Q2 is answered:
+
+        a person  -> widen or narrow the roles in CanConfirmPayment
+        a system  -> swap that class for token authentication
+
+    Neither touches this function.
+
+    Only from Hold. Releasing a cancelled order would resurrect a document
+    the school withdrew; releasing a picked one would restate history.
+
+    `payment_reference` is free text — a receipt number, a mobile money
+    reference — because until Q2 is answered we do not know what shape the
+    real one is.
+    """
+    if not order.can_be_released:
+        raise CannotRelease(
+            f"{order.number} is {order.get_status_display().lower()} and cannot "
+            "be released. Only an order still on hold can be."
+        )
+
+    order.status = OrderStatus.RELEASED
+    order.released_at = timezone.now()
+    order.released_by = released_by
+    order.payment_reference = payment_reference.strip()
+    order.save(
+        update_fields=["status", "released_at", "released_by", "payment_reference"]
     )
     return order
 
