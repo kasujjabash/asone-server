@@ -91,22 +91,42 @@ def _warehouse(request):
         "There is no stock-level table. Every figure here is summed from the "
         "ledger on read, which is what makes the audit trail and the stock "
         "level incapable of disagreeing.\n\n"
-        "Warehouse staff see their own warehouse only."
+        "Warehouse staff see their own warehouse only. School staff see the "
+        "warehouse that serves their school — the stock is the warehouse's, "
+        "not the school's."
     ),
 )
 class StockLevelView(APIView):
     # F47 gives Finance "All sites" — they post the inventory adjustments and
     # cannot do that without seeing what is on hand. CanReceiveAndShip does
     # not include Finance, so the view declares its own read audience.
+    #
+    # School Staff read it as well. AsOne asked for schools to see inventory,
+    # and what they meant is a school looking at the warehouse that serves it
+    # — "are my shirts there yet" — not stock held at the school. Schools
+    # hold none: the ledger has a warehouse column and no school column.
     permission_classes = [*AUTHENTICATED, MasterDataAccess]
-    read_roles = (Role.WAREHOUSE_STAFF, Role.FINANCE)
+    read_roles = (Role.WAREHOUSE_STAFF, Role.FINANCE, Role.SCHOOL_STAFF)
 
     def get(self, request):
+        user = request.user
         warehouse = _warehouse(request)
 
-        # Warehouse staff are pinned to their own site whatever they ask for.
-        if request.user.role == Role.WAREHOUSE_STAFF:
-            warehouse = request.user.warehouse
+        # Site-bound roles are pinned whatever they ask for. A school clerk
+        # has no warehouse of their own, so they get the one their school
+        # orders from — D4, a school orders from one warehouse and no other.
+        if user.role == Role.WAREHOUSE_STAFF:
+            warehouse = user.warehouse
+        elif user.role == Role.SCHOOL_STAFF:
+            warehouse = user.school.primary_warehouse if user.school_id else None
+
+        # A site-bound account with no site is a broken account. `clean()`
+        # refuses to save one, but nothing stops objects.create(), and if one
+        # exists then leaving `warehouse` as None here would hand them every
+        # warehouse in the country. Empty is the safe reading — the same
+        # deny-by-default scope_to_user_site() applies.
+        if warehouse is None and user.role in (Role.WAREHOUSE_STAFF, Role.SCHOOL_STAFF):
+            return Response([])
 
         rows = services.stock_levels(
             warehouse=warehouse,
