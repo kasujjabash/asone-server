@@ -143,6 +143,37 @@ class LoginSerializer(TokenObtainPairSerializer):
         return data
 
 
+class LoginChallengeIssuedSerializer(serializers.Serializer):
+    """What the password step returns now: a challenge, not tokens."""
+
+    challenge = serializers.UUIDField(
+        help_text="Send this back with the code to finish signing in."
+    )
+    expires_at = serializers.DateTimeField()
+    detail = serializers.CharField()
+    email_hint = serializers.CharField(
+        help_text='Where the code went, partly masked — "j••••s@asone.test".'
+    )
+
+
+class VerifyLoginCodeSerializer(serializers.Serializer):
+    """POST /api/auth/login/verify/ — the second factor."""
+
+    challenge = serializers.UUIDField()
+    code = serializers.CharField(
+        max_length=12,
+        trim_whitespace=True,
+        help_text="The code from the email.",
+    )
+
+
+class EmailVerificationSerializer(serializers.Serializer):
+    """Confirming a new account's address with the emailed code."""
+
+    email = serializers.EmailField()
+    code = serializers.CharField(max_length=12, trim_whitespace=True)
+
+
 class LogoutSerializer(serializers.Serializer):
     """POST /api/auth/logout/ — the refresh token to blacklist."""
 
@@ -263,18 +294,27 @@ class UserAdminSerializer(serializers.ModelSerializer):
 
 
 class UserCreateSerializer(UserAdminSerializer):
-    """Creating an account: first name, last name, email, role, password.
+    """Creating an account: first name, last name, email, role.
 
-    The lead types the password and passes it to the person. Because two
-    people then know it, `must_change_password` defaults to True so it stops
-    being a shared password at the owner's first sign-in. A lead who has a
-    reason to skip that can send `must_change_password: false`.
+    The password is generated unless one is typed, and shown to the lead
+    **once** so they can pass it on. It is never emailed — the confirmation
+    code is, and keeping the two on separate routes is what makes the code
+    worth anything.
+
+    `must_change_password` stays on, because until the owner replaces it two
+    people know that password.
     """
 
     password = serializers.CharField(
         write_only=True,
+        required=False,
+        allow_blank=True,
         style={"input_type": "password"},
-        help_text="Checked against Django's password validators.",
+        help_text=(
+            "Leave this out and one is generated for you, shown once. Type "
+            "one only if you have a reason to. Either way you pass it to the "
+            "person yourself — it is never emailed."
+        ),
     )
     must_change_password = serializers.BooleanField(
         default=True,

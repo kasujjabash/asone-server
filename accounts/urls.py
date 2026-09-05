@@ -16,6 +16,18 @@ router.register("login-attempts", views.LoginAttemptViewSet, basename="login-att
 urlpatterns = [
     # Tokens
     path("login/", views.LoginView.as_view(), name="login"),
+    path(
+        "login/verify/",
+        views.VerifyLoginCodeView.as_view(),
+        name="login-verify",
+    ),
+    # Open: a new member of staff has no account to authenticate with yet,
+    # which is exactly what the emailed code stands in for.
+    path(
+        "verify-email/",
+        views.EmailVerificationView.as_view(),
+        name="verify-email",
+    ),
     path("refresh/", views.RefreshView.as_view(), name="refresh"),
     path("verify/", views.VerifyView.as_view(), name="verify"),
     path("logout/", views.LogoutView.as_view(), name="logout"),

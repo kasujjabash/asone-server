@@ -6,15 +6,19 @@ grant Django admin access, or delete an account.
 """
 
 from django.core.cache import cache
+from django.test import override_settings
 from django.urls import reverse
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 
 from accounts.models import LoginAttempt, User
 
-from .factories import PASSWORD, build_sites, make_user
+from .factories import PASSWORD, build_sites, make_user, sign_in
 
 
+# Sign-in is two steps; locmem lets the tests read the emailed code.
+@override_settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend")
 class UserAdministrationTests(APITestCase):
     def setUp(self):
         cache.clear()
@@ -68,8 +72,19 @@ class UserAdministrationTests(APITestCase):
         self.assertEqual(joan.warehouse, self.sites["serere"])
         self.assertTrue(joan.check_password("her-first-passphrase"))
 
+    def confirm_address(self, email="joan@asone.test"):
+        """New accounts must confirm the emailed code before signing in.
+
+        Done directly rather than over HTTP — these tests are about user
+        administration, and the confirmation flow has its own file.
+        """
+        user = User.objects.get(email=email)
+        user.email_verified_at = timezone.now()
+        user.save(update_fields=["email_verified_at"])
+
     def test_the_new_user_can_sign_in_with_that_email_and_password(self):
         self.create()
+        self.confirm_address()
         self.client.force_authenticate(None)
 
         response = self.client.post(
@@ -78,6 +93,19 @@ class UserAdministrationTests(APITestCase):
             format="json",
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    def test_they_cannot_sign_in_until_the_address_is_confirmed(self):
+        """The password alone is not enough — the address it was created
+        against has to be proven first."""
+        self.create()
+        self.client.force_authenticate(None)
+
+        response = self.client.post(
+            reverse("accounts:login"),
+            {"email": "joan@asone.test", "password": "her-first-passphrase"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
     def test_the_lead_chosen_password_must_pass_django_validators(self):
         """A lead must not be able to set "1234" for a colleague."""
@@ -111,12 +139,11 @@ class UserAdministrationTests(APITestCase):
         temporary = "her-first-passphrase"
         self.create(role=User.Role.PROGRAM_LEAD, warehouse=None, password=temporary)
 
+        self.confirm_address()
         self.client.force_authenticate(None)
-        signed_in = self.client.post(
-            reverse("accounts:login"),
-            {"email": "joan@asone.test", "password": temporary},
-            format="json",
-        )
+        # Both steps: a new account still has to pass the emailed sign-in
+        # code before it meets the forced password change.
+        signed_in = sign_in(self.client, "joan@asone.test", temporary)
         self.assertEqual(signed_in.status_code, status.HTTP_200_OK)
         self.assertTrue(signed_in.data["user"]["must_change_password"])
 
@@ -220,11 +247,7 @@ class UserAdministrationTests(APITestCase):
         self.assertTrue(self.clerk.check_password(response.data["password"]))
 
     def test_setting_a_password_signs_that_user_out(self):
-        signed_in = self.client.post(
-            reverse("accounts:login"),
-            {"email": "julius@asone.test", "password": PASSWORD},
-            format="json",
-        )
+        signed_in = sign_in(self.client, "julius@asone.test", PASSWORD)
         stale_refresh = signed_in.data["refresh"]
 
         self.client.force_authenticate(self.lead)
@@ -257,7 +280,9 @@ class UserAdministrationTests(APITestCase):
             {"email": "julius@asone.test", "password": PASSWORD},
             format="json",
         )
-        self.assertEqual(blocked.status_code, status.HTTP_401_UNAUTHORIZED)
+        # 403 rather than 401: a deactivated account is told it has no
+        # access, the same as one that was never created.
+        self.assertEqual(blocked.status_code, status.HTTP_403_FORBIDDEN)
 
     def test_a_lead_cannot_deactivate_themselves(self):
         """Lockout guard — undoing it would need another lead on site."""

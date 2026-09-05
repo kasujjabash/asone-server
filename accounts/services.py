@@ -7,14 +7,19 @@ HTTP. Nothing in this module imports from accounts.views.
 
 import secrets
 import string
+from datetime import timedelta
 
+from django.conf import settings
 from django.contrib.auth import get_user_model
+from django.contrib.auth.hashers import check_password, make_password
+from django.core.mail import send_mail
 from django.db import transaction
+from django.utils import timezone
 from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken, OutstandingToken
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from . import permissions as perms
-from .models import LoginAttempt
+from .models import EmailVerification, LoginAttempt, LoginChallenge
 
 User = get_user_model()
 
@@ -151,14 +156,20 @@ def generate_temporary_password(length: int = 12) -> str:
 def create_staff_user(*, password=None, must_change_password=True, **fields):
     """Create a staff account.
 
-    ``password`` is what the lead typed. Omit it and one is generated —
-    useful from a management command, and returned so it can be shown once.
+    ``password`` is what the lead typed. Omit it and one is generated, which
+    is the normal path — the lead reads it once and passes it on, and
+    `must_change_password` then forces the owner to replace it at first
+    sign-in, because until they do two people know it.
+
+    The generated password is **not emailed**. It travels by whatever route
+    the lead uses; the confirmation code goes by email. Two routes, so
+    holding both means something.
 
     The role/site invariant is checked here rather than trusted, because this
     is reachable from the API, the admin and a management command alike.
 
     Returns ``(user, password)``. The password is never stored in clear text
-    and cannot be read back afterwards; showing it to the lead is the
+    and cannot be read back afterwards; showing it to the lead once is the
     caller's job.
     """
     if not password:
@@ -343,3 +354,338 @@ def _scope_label_for_role(role) -> str:
     if role == User.Role.SCHOOL_STAFF:
         return "assigned_schools"
     return "none"
+
+
+# ---------------------------------------------------------------------------
+# Two-factor sign-in
+# ---------------------------------------------------------------------------
+
+
+class NoAccess(Exception):
+    """The address is not a user of this system, or has been deactivated.
+
+    Deliberately the *same* exception for both, so the response cannot
+    distinguish "never added" from "removed". Central Office deactivates
+    staff rather than deleting them, and telling a former employee which of
+    the two happened to them is information they have no use for.
+    """
+
+
+class ChallengeUnusable(Exception):
+    """Expired, already spent, or out of attempts. Start again."""
+
+
+def _new_code() -> str:
+    """A numeric code, from the OS random source.
+
+    `secrets`, not `random`: the latter is a Mersenne Twister seeded
+    predictably enough that watching a handful of codes can reveal the rest.
+    Zero-padded, so "004182" is six digits and not four.
+    """
+    upper = 10 ** settings.LOGIN_CODE_LENGTH
+    return str(secrets.randbelow(upper)).zfill(settings.LOGIN_CODE_LENGTH)
+
+
+def user_with_access(email):
+    """The active user for ``email``, or raise NoAccess.
+
+    Called **before** the password is checked, which is what lets the system
+    say "you do not have access" rather than "wrong password" to somebody
+    who was never added.
+
+    That is a deliberate trade, and worth understanding before changing it:
+    it confirms to a caller whether an address is a user here, which is user
+    enumeration. It is accepted because this is a closed system of a few
+    dozen named accounts created by Central Office — nobody self-registers,
+    so the set of users is not a secret worth protecting — and because the
+    alternative leaves a teacher who was never added retyping a password
+    that was never going to work.
+
+    Two things make it safe enough: `LoginRateThrottle` limits attempts per
+    address, and every attempt is recorded in `LoginAttempt`.
+
+    **If AsOne ever opens self-registration, revisit this.** At that point
+    the user list stops being a known quantity and the trade stops paying.
+    """
+    user = User.objects.filter(email__iexact=(email or "").strip()).first()
+    if user is None or not user.is_active:
+        raise NoAccess(
+            "You do not have access to this system. Ask AsOne Central Office "
+            "to create an account for you."
+        )
+    return user
+
+
+@transaction.atomic
+def start_login_challenge(user, *, request=None):
+    """Issue a one-time code and email it — the second factor.
+
+    Any earlier unspent challenge for this user is retired first. Without
+    that, somebody who asks for three codes in a row could use any of the
+    three, which quietly triples the guessing surface and means a code from
+    twenty minutes ago still works.
+
+    Returns the challenge. The code itself is returned nowhere and stored
+    only as a hash: the email is the only place it exists in readable form.
+    """
+    LoginChallenge.objects.filter(user=user, consumed_at__isnull=True).update(
+        consumed_at=timezone.now()
+    )
+
+    code = _new_code()
+    challenge = LoginChallenge.objects.create(
+        user=user,
+        code_hash=make_password(code),
+        expires_at=timezone.now()
+        + timedelta(minutes=settings.LOGIN_CODE_TTL_MINUTES),
+        ip_address=_client_ip(request) if request else None,
+    )
+
+    send_login_code(user, code)
+    return challenge
+
+
+def send_login_code(user, code):
+    """Email the code.
+
+    Failures are not swallowed. If the mail cannot be sent the sign-in must
+    fail loudly — a caller told "check your email" for a message that was
+    never sent has no way to tell that from a slow one, and will sit waiting.
+    """
+    minutes = settings.LOGIN_CODE_TTL_MINUTES
+    send_mail(
+        subject=f"Your AsOne sign-in code: {code}",
+        message=(
+            f"Hello {user.get_full_name() or user.email},\n\n"
+            f"Your sign-in code is {code}\n\n"
+            f"It expires in {minutes} minutes and can be used once.\n\n"
+            "If you did not try to sign in, someone else may know your "
+            "password. Tell AsOne Central Office, and change it as soon as "
+            "you can.\n"
+        ),
+        from_email=settings.DEFAULT_FROM_EMAIL,
+        recipient_list=[user.email],
+        fail_silently=False,
+    )
+
+
+def verify_login_code(challenge_id, code):
+    """Check a code and spend the challenge. Returns the user.
+
+    Wrong codes count against the attempt limit; a right one consumes the
+    challenge so it can never be replayed.
+
+    ## Why the raise happens outside the transaction
+
+    This function was written with `@transaction.atomic` around the whole
+    body, which quietly made the attempt limit do nothing: incrementing
+    `attempts` and then raising rolled the increment straight back, so every
+    guess started from zero and a six-digit code could be worked through at
+    leisure. Caught by
+    `test_two_factor.py::test_guessing_runs_out_of_tries`.
+
+    So the transaction covers the read and the write, and the refusal is
+    raised after it has committed. The lock still does its job — two
+    requests cannot both spend one challenge — but a failed attempt is a
+    fact that has to survive being refused.
+
+    Raises ChallengeUnusable for anything meaning "start again" — unknown,
+    expired, already used, out of attempts. One exception for all of them on
+    purpose: the difference is no use to the person typing, and telling an
+    attacker which wrong thing they hit is help.
+    """
+    refusal = None
+
+    with transaction.atomic():
+        challenge = (
+            LoginChallenge.objects.select_for_update()
+            .select_related("user")
+            .filter(pk=challenge_id)
+            .first()
+        )
+
+        if challenge is None or not challenge.is_usable:
+            refusal = (
+                "That code is no longer valid. Please sign in again to get a new one."
+            )
+        # Re-checked rather than trusted from the start of the sign-in: an
+        # account deactivated in the last ten minutes must not be able to
+        # finish a sign-in it had already begun.
+        elif not challenge.user.is_active:
+            challenge.consumed_at = timezone.now()
+            challenge.save(update_fields=["consumed_at"])
+            refusal = (
+                "That code is no longer valid. Please sign in again to get a new one."
+            )
+        elif not check_password(code, challenge.code_hash):
+            challenge.attempts += 1
+            challenge.save(update_fields=["attempts"])
+            remaining = settings.LOGIN_CODE_MAX_ATTEMPTS - challenge.attempts
+            refusal = (
+                "Too many incorrect codes. Please sign in again to get a new one."
+                if remaining <= 0
+                else f"That code is not correct. {remaining} "
+                f"{'try' if remaining == 1 else 'tries'} left."
+            )
+        else:
+            challenge.consumed_at = timezone.now()
+            challenge.save(update_fields=["consumed_at"])
+
+    if refusal:
+        raise ChallengeUnusable(refusal)
+
+    return challenge.user
+
+
+# ---------------------------------------------------------------------------
+# Email verification — proving a new account's address
+# ---------------------------------------------------------------------------
+
+
+class VerificationUnusable(Exception):
+    """Expired, already used, out of attempts, or the code is wrong.
+
+    One exception for all of them, for the same reason `ChallengeUnusable`
+    is: the difference is no use to the person typing, and telling somebody
+    else which wrong thing they hit is help.
+    """
+
+
+STALE_CODE = (
+    "That code is no longer valid. Ask your lead to send the verification "
+    "code again."
+)
+
+
+def send_email_verification(user, *, sent_by=None, request=None):
+    """Email a code proving this address belongs to this person.
+
+    Any earlier unused code is retired first, so re-sending does not leave
+    two working codes.
+
+    The password is deliberately **not** in this email. It reaches the
+    person through their lead, by a different route; putting both in one
+    inbox would make this step prove nothing.
+    """
+    EmailVerification.objects.filter(user=user, consumed_at__isnull=True).update(
+        consumed_at=timezone.now()
+    )
+
+    code = _new_code()
+    verification = EmailVerification.objects.create(
+        user=user,
+        sent_by=sent_by,
+        code_hash=make_password(code),
+        expires_at=timezone.now() + timedelta(days=settings.INVITATION_TTL_DAYS),
+        ip_address=_client_ip(request) if request else None,
+    )
+
+    send_verification_email(user, code, sent_by=sent_by)
+    return verification
+
+
+def send_verification_email(user, code, *, sent_by=None):
+    """Tell somebody they have an account and how to confirm the address.
+
+    Failures are not swallowed. If this cannot be sent, creating the account
+    must fail loudly — an account whose address was never confirmed cannot
+    be signed into, so reporting success would be a lie.
+    """
+    days = settings.INVITATION_TTL_DAYS
+    who = sent_by.get_full_name() if sent_by else "AsOne Central Office"
+
+    send_mail(
+        subject="Confirm your AsOne Logistics account",
+        message=(
+            f"Hello {user.get_full_name() or user.email},\n\n"
+            f"{who} has created an account for you on AsOne Logistics, as "
+            f"{user.get_role_display()}.\n\n"
+            f"Your confirmation code is {code}\n\n"
+            "Enter it on the sign-in page to confirm this address. You will "
+            "then be able to sign in with the password your lead gave you, "
+            "and you will be asked to replace it with one only you know.\n\n"
+            "Your password is not in this email, and never will be.\n\n"
+            f"The code expires in {days} days. If it runs out, ask your lead "
+            "to send another.\n\n"
+            "If you were not expecting this, you can ignore it — the account "
+            "cannot be used until this code is entered.\n"
+        ),
+        from_email=settings.DEFAULT_FROM_EMAIL,
+        recipient_list=[user.email],
+        fail_silently=False,
+    )
+
+
+def verify_email(email, code):
+    """Confirm the address. Returns the user.
+
+    Marks the account verified and spends the code. After this the person
+    can sign in with the password their lead gave them — and will be made to
+    replace it, because two people know that one.
+
+    The refusal is raised after the transaction commits, so a failed attempt
+    survives being refused — see `verify_login_code` for the bug that taught
+    us that.
+    """
+    refusal = None
+    user = None
+
+    with transaction.atomic():
+        verification = (
+            EmailVerification.objects.select_for_update()
+            .select_related("user")
+            .filter(user__email__iexact=(email or "").strip())
+            .order_by("-created_at")
+            .first()
+        )
+
+        if verification is None or not verification.is_usable:
+            refusal = STALE_CODE
+        elif not verification.user.is_active:
+            refusal = STALE_CODE
+        elif not check_password(code, verification.code_hash):
+            verification.attempts += 1
+            verification.save(update_fields=["attempts"])
+            remaining = settings.LOGIN_CODE_MAX_ATTEMPTS - verification.attempts
+            refusal = (
+                STALE_CODE
+                if remaining <= 0
+                else f"That code is not correct. {remaining} "
+                f"{'try' if remaining == 1 else 'tries'} left."
+            )
+        else:
+            verification.consumed_at = timezone.now()
+            verification.save(update_fields=["consumed_at"])
+            user = verification.user
+            user.email_verified_at = timezone.now()
+            user.save(update_fields=["email_verified_at"])
+
+    if refusal:
+        raise VerificationUnusable(refusal)
+
+    return user
+
+
+class EmailNotVerified(Exception):
+    """The account exists and the password is right, but the address was
+    never confirmed.
+
+    Raised **after** the password is checked, not before. Checking first
+    would tell anybody who typed an address whether it had an unverified
+    account, which is more than the closed-door message already gives away.
+    """
+
+
+def require_verified_email(user):
+    """Refuse a sign-in for an address nobody has confirmed.
+
+    An account is created with a password the lead knows and an address
+    nobody has proven. The code is what proves it, and until it is entered
+    the account is not a way in — otherwise a mistyped address would still
+    make a working account, reachable by whoever holds the password.
+    """
+    if not user.email_is_verified:
+        raise EmailNotVerified(
+            "Your email address has not been confirmed yet. Check your inbox "
+            "for the confirmation code and enter it before signing in."
+        )

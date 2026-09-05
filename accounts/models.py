@@ -1,6 +1,10 @@
+import uuid
+
+from django.conf import settings
 from django.contrib.auth.models import AbstractUser
 from django.core.exceptions import ValidationError
 from django.db import models
+from django.utils import timezone
 
 from .managers import UserManager
 
@@ -47,6 +51,11 @@ class User(AbstractUser):
     # which is exactly the shared-password situation AsOne asked us to prevent
     # (p.9: "There can be no sharing of Passwords"). Enforced by
     # accounts.permissions.PasswordChangeNotPending.
+    #: Set when the person has entered the code emailed to this address.
+    #: Null means the address is unproven and sign-in is refused — a
+    #: mistyped address must not become a working account.
+    email_verified_at = models.DateTimeField(null=True, blank=True)
+
     must_change_password = models.BooleanField(
         default=False,
         help_text="Blocks everything except viewing your own account and setting a new password.",
@@ -83,6 +92,10 @@ class User(AbstractUser):
     def required_site_field(cls, role):
         """"warehouse", "school", or None for the all-locations roles."""
         return cls.SITE_FIELD_BY_ROLE.get(role)
+
+    @property
+    def email_is_verified(self) -> bool:
+        return self.email_verified_at is not None
 
     def clean(self):
         """Keep role and site consistent.
@@ -164,3 +177,131 @@ class LoginAttempt(models.Model):
     def __str__(self):
         outcome = "succeeded" if self.succeeded else "failed"
         return f"{self.email} {outcome} at {self.at:%Y-%m-%d %H:%M}"
+
+
+class OneTimeCode(models.Model):
+    """Shared behaviour for a code emailed to somebody, once.
+
+    Two things in this system work this way — the sign-in code (`LoginChallenge`)
+    and the invitation that gets a new member of staff their first password
+    (`Invitation`). They differ in how long they last and what they unlock,
+    and in nothing else, so the rules that make a code a second factor rather
+    than a formality live here where they cannot drift apart.
+
+    ## What is stored
+
+    **The code is hashed, never kept in plain text.** Same hashers as a
+    password, for the same reason: anybody who can read this table — a
+    backup, a support session, a stray query — must not be able to use
+    somebody else's code.
+
+    ## Why expiry, attempts and single use all matter
+
+    A six-digit code is a million possibilities, which is plenty against a
+    person and nothing at all against a script. Take away the attempt limit
+    and it is decoration; take away the expiry and a code left in an inbox
+    is a spare key; take away single use and it can be replayed.
+    """
+
+    #: The opaque handle the client sends back. A UUID rather than a
+    #: sequential id, so one cannot be guessed from the one before it.
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    # Hashed. See the class docstring.
+    code_hash = models.CharField(max_length=128, editable=False)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField(db_index=True)
+
+    #: Wrong codes tried so far. At the limit the code is dead and the person
+    #: starts again.
+    attempts = models.PositiveSmallIntegerField(default=0)
+
+    #: Set the moment it is spent. A code that has done its job once must
+    #: never do it again, even inside its expiry window.
+    consumed_at = models.DateTimeField(null=True, blank=True)
+
+    # Kept for the same reason LoginAttempt keeps them: a code requested from
+    # one place and used from another is worth being able to see later.
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+
+    class Meta:
+        abstract = True
+
+    @property
+    def is_expired(self) -> bool:
+        return timezone.now() >= self.expires_at
+
+    @property
+    def is_consumed(self) -> bool:
+        return self.consumed_at is not None
+
+    @property
+    def attempts_exhausted(self) -> bool:
+        return self.attempts >= settings.LOGIN_CODE_MAX_ATTEMPTS
+
+    @property
+    def is_usable(self) -> bool:
+        """One place that decides, so no two callers can differ."""
+        return not (self.is_expired or self.is_consumed or self.attempts_exhausted)
+
+
+class LoginChallenge(OneTimeCode):
+    """A one-time code emailed to someone who has just passed the password step.
+
+    Two-factor authentication, and the reason it is worth the extra step
+    here: a stolen or shared AsOne password is otherwise enough to read
+    every school's orders and every warehouse's stock. The second factor
+    ties a sign-in to the mailbox Central Office chose when they created the
+    account.
+
+    The email address is not on this row. It is reachable through ``user``,
+    and duplicating it would be one more copy to keep in step.
+    """
+
+    user = models.ForeignKey(
+        User, on_delete=models.CASCADE, related_name="login_challenges"
+    )
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["user", "consumed_at"])]
+        verbose_name = "login verification code"
+
+    def __str__(self):
+        return f"Code for {self.user.email} ({self.id})"
+
+
+class EmailVerification(OneTimeCode):
+    """The code that proves a new member of staff holds the mailbox.
+
+    ## Why this exists alongside the password
+
+    A lead creates the account and the system generates a password, which the
+    lead reads once and passes on — by WhatsApp, or in person. That proves
+    nothing about the email address on the account: it could be mistyped, or
+    belong to somebody who left.
+
+    The code is emailed and travels by a different route from the password.
+    Holding both is what says "this is the right person, at the right
+    address". Emailing the password too would collapse the two routes into
+    one and make this step decoration.
+
+    Until it is used, `User.email_verified_at` is null and sign-in is
+    refused — an account with an unverified address is not a way in.
+    """
+
+    user = models.ForeignKey(
+        User, on_delete=models.CASCADE, related_name="email_verifications"
+    )
+    sent_by = models.ForeignKey(
+        User, null=True, blank=True, on_delete=models.PROTECT, related_name="+"
+    )
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["user", "consumed_at"])]
+        verbose_name = "email verification code"
+
+    def __str__(self):
+        return f"Email verification for {self.user.email}"

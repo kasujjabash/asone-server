@@ -6,15 +6,19 @@ file gets trimmed.
 """
 
 from django.core.cache import cache
+from django.test import override_settings
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
 
 from accounts.models import User
 
-from .factories import PASSWORD, build_sites, make_user
+from .factories import PASSWORD, build_sites, make_user, sign_in
 
 
+# Sign-in is two steps now: a password buys an emailed code. locmem so the
+# tests can read the code back out of mail.outbox.
+@override_settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend")
 class AuthenticationTests(APITestCase):
     def setUp(self):
         # Throttle counters live in the cache and would otherwise carry over
@@ -32,23 +36,32 @@ class AuthenticationTests(APITestCase):
     # -- helpers ---------------------------------------------------------
 
     def login(self, email="julius@asone.test", password=PASSWORD):
+        """The **password step only** — step 1 of 2.
+
+        Returns a challenge, not tokens. Tests about refusals want this;
+        tests that need to be signed in want `complete_login()`.
+        """
         return self.client.post(
             reverse("accounts:login"),
             {"email": email, "password": password},
             format="json",
         )
 
+    def complete_login(self, email="julius@asone.test", password=PASSWORD):
+        """Both steps, returning the response that carries the tokens."""
+        return sign_in(self.client, email, password)
+
     def authenticate(self):
         """Sign in and attach the access token, returning the whole payload."""
-        response = self.login()
+        response = self.complete_login()
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {response.data['access']}")
         return response.data
 
     # -- login -----------------------------------------------------------
 
-    def test_login_returns_tokens_and_the_user(self):
-        data = self.login().data
+    def test_completing_both_steps_returns_tokens_and_the_user(self):
+        data = self.complete_login().data
 
         self.assertIn("access", data)
         self.assertIn("refresh", data)
@@ -58,7 +71,7 @@ class AuthenticationTests(APITestCase):
 
     def test_login_payload_carries_the_access_summary(self):
         """The frontend draws its navigation from this, so it must be present."""
-        access = self.login().data["user"]["access"]
+        access = self.complete_login().data["user"]["access"]
 
         self.assertEqual(access["scope"], "assigned_warehouse")
         self.assertTrue(access["functions"]["warehouse_receiving_and_shipping"])
@@ -66,26 +79,45 @@ class AuthenticationTests(APITestCase):
         self.assertFalse(access["functions"]["inventory_adjustments"])
 
     def test_login_never_returns_the_password_hash(self):
-        self.assertNotIn("password", self.login().data["user"])
+        self.assertNotIn("password", self.complete_login().data["user"])
 
     def test_wrong_password_is_rejected(self):
         response = self.login(password="not-it")
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
 
-    def test_unknown_account_and_wrong_password_look_identical(self):
-        """Neither response should reveal whether the account exists."""
+    def test_an_unknown_account_is_told_it_has_no_access(self):
+        """**This reverses an earlier decision, deliberately.**
+
+        This test used to assert the opposite — that an unknown address and
+        a wrong password were indistinguishable, so that nobody could learn
+        which addresses are users here. Bashir asked on 3 September 2026 for
+        somebody who was never added to be told so plainly, and that is a
+        change of mind about a real trade-off, not a bug fix.
+
+        What is given up: a caller can now discover whether an address has
+        an account. What is bought: a teacher who was never added stops
+        retyping a password that was never going to work.
+
+        Accepted because this is a closed system of a few dozen accounts
+        created by Central Office — nobody self-registers, so the user list
+        is not a secret worth keeping. See
+        `accounts/services.py::user_with_access`, and revisit it the day
+        anybody can sign themselves up.
+        """
         unknown = self.login(email="nobody@asone.test", password="whatever")
         wrong = self.login(password="not-it")
 
-        self.assertEqual(unknown.status_code, wrong.status_code)
-        self.assertEqual(unknown.data, wrong.data)
+        self.assertEqual(unknown.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(wrong.status_code, status.HTTP_401_UNAUTHORIZED)
 
     def test_deactivated_user_cannot_sign_in(self):
         """Deactivating an account is how AsOne removes someone's access."""
         self.user.is_active = False
         self.user.save(update_fields=["is_active"])
 
-        self.assertEqual(self.login().status_code, status.HTTP_401_UNAUTHORIZED)
+        # 403, not 401: deactivating is how AsOne removes access, and the
+        # person is told that plainly rather than left guessing at a password.
+        self.assertEqual(self.login().status_code, status.HTTP_403_FORBIDDEN)
 
     # -- me --------------------------------------------------------------
 
@@ -165,7 +197,7 @@ class AuthenticationTests(APITestCase):
     # -- refresh and logout ----------------------------------------------
 
     def test_refresh_returns_a_new_access_token(self):
-        refresh = self.login().data["refresh"]
+        refresh = self.complete_login().data["refresh"]
 
         response = self.client.post(
             reverse("accounts:refresh"), {"refresh": refresh}, format="json"
@@ -175,7 +207,7 @@ class AuthenticationTests(APITestCase):
 
     def test_a_rotated_refresh_token_cannot_be_reused(self):
         """ROTATE_REFRESH_TOKENS + BLACKLIST_AFTER_ROTATION, proven."""
-        refresh = self.login().data["refresh"]
+        refresh = self.complete_login().data["refresh"]
         self.client.post(reverse("accounts:refresh"), {"refresh": refresh}, format="json")
 
         replayed = self.client.post(
@@ -241,7 +273,7 @@ class AuthenticationTests(APITestCase):
 
     def test_password_change_signs_out_other_sessions(self):
         """A password change should not leave an old device signed in."""
-        stale_refresh = self.login().data["refresh"]
+        stale_refresh = self.complete_login().data["refresh"]
         self.authenticate()
 
         self.client.post(

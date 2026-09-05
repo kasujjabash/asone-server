@@ -256,3 +256,44 @@ CORS_ALLOWED_ORIGINS = [
     ).split(",")
     if origin.strip()
 ]
+
+
+# ---------------------------------------------------------------------------
+# Email
+# ---------------------------------------------------------------------------
+
+# In development the console backend prints the message to the terminal that
+# is running the server, so a developer can read the login code without any
+# mail server existing. Production must set DJANGO_EMAIL_BACKEND and the SMTP
+# variables below — with none of them set and DEBUG off, mail is written to
+# the console nobody is reading and **nobody can sign in**.
+EMAIL_BACKEND = os.environ.get(
+    "DJANGO_EMAIL_BACKEND", "django.core.mail.backends.console.EmailBackend"
+)
+EMAIL_HOST = os.environ.get("DJANGO_EMAIL_HOST", "")
+EMAIL_PORT = int(os.environ.get("DJANGO_EMAIL_PORT", "587"))
+EMAIL_HOST_USER = os.environ.get("DJANGO_EMAIL_HOST_USER", "")
+EMAIL_HOST_PASSWORD = os.environ.get("DJANGO_EMAIL_HOST_PASSWORD", "")
+EMAIL_USE_TLS = os.environ.get("DJANGO_EMAIL_USE_TLS", "True").lower() == "true"
+DEFAULT_FROM_EMAIL = os.environ.get(
+    "DJANGO_DEFAULT_FROM_EMAIL", "AsOne Logistics <no-reply@asone.test>"
+)
+
+# How long the sign-in email takes to arrive and be typed in. Long enough for
+# a rural connection and a person finding their phone; short enough that a
+# code left on a screen is not a spare key.
+LOGIN_CODE_TTL_MINUTES = int(os.environ.get("ASONE_LOGIN_CODE_TTL_MINUTES", "10"))
+
+# Wrong tries before the challenge dies and the password step has to be
+# repeated. Six digits is a million possibilities — the limit is what stops a
+# script working through them.
+LOGIN_CODE_MAX_ATTEMPTS = int(os.environ.get("ASONE_LOGIN_CODE_MAX_ATTEMPTS", "5"))
+
+# Digits in the code. Six is the length people expect and can hold in their
+# head between the mail app and the browser.
+LOGIN_CODE_LENGTH = int(os.environ.get("ASONE_LOGIN_CODE_LENGTH", "6"))
+
+# How long a new member of staff has to accept their invitation before it
+# has to be sent again. Days rather than minutes: somebody added on a Friday
+# should still be able to start on Monday.
+INVITATION_TTL_DAYS = int(os.environ.get("ASONE_INVITATION_TTL_DAYS", "7"))

@@ -33,8 +33,30 @@ class UserManager(BaseUserManager):
         return self._create_user(email, password, **extra_fields)
 
     def create_superuser(self, email, password=None, **extra_fields):
+        """The first account on a new system, made at the console.
+
+        **The address is marked confirmed.** Every other account proves its
+        address with an emailed code, and this one cannot: there is nobody
+        to send it and nobody to receive it — no account exists yet to send
+        it from, and on a fresh install the mail server is usually the last
+        thing configured.
+
+        It is also unnecessary. Confirmation exists to prove an address that
+        *somebody else* typed into a form. Here the person is at a terminal
+        on the server, entering their own address, and has already proved far
+        more than an email code could.
+
+        Without this, launch day fails completely: the first Program Lead
+        cannot sign in to the API, so cannot add anybody, so nothing works.
+        Verified by bootstrapping an empty database on 5 September 2026 —
+        the account was created, the password was right, and sign-in was
+        refused.
+        """
+        from django.utils import timezone
+
         extra_fields.setdefault("is_staff", True)
         extra_fields.setdefault("is_superuser", True)
+        extra_fields.setdefault("email_verified_at", timezone.now())
 
         if extra_fields.get("is_staff") is not True:
             raise ValueError("A superuser must have is_staff=True.")

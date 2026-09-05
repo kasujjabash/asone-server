@@ -12,6 +12,7 @@ those users have somewhere to belong.
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
+from django.utils import timezone
 
 from datetime import date
 from decimal import Decimal
@@ -282,6 +283,10 @@ class Command(BaseCommand):
                 role=role,
                 warehouse=warehouses.get(warehouse_name) if warehouse_name else None,
                 school=schools.get(school_name) if school_name else None,
+                # Demo accounts skip email confirmation. Nobody can read
+                # @asone.test mail, so leaving it unconfirmed would create
+                # accounts that exist and can never sign in.
+                email_verified_at=timezone.now(),
             )
             user.set_password(DEMO_PASSWORD)
             # Run the role/site invariant rather than trusting the table above.

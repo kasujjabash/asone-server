@@ -6,15 +6,19 @@ worth testing lives in accounts/services.py, where a test can reach it
 without building a request.
 """
 
+from django.conf import settings
+from django.db import transaction
 from drf_spectacular.utils import OpenApiResponse, extend_schema
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
-from rest_framework.exceptions import PermissionDenied
+from rest_framework.exceptions import APIException, PermissionDenied
+from rest_framework.exceptions import ValidationError as DRFValidationError
 from rest_framework.generics import RetrieveUpdateAPIView
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.exceptions import TokenError
+from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import (
     TokenObtainPairView,
     TokenRefreshView,
@@ -27,6 +31,8 @@ from .permissions import AUTHENTICATED, CanUpdateTables
 from .throttling import LoginBurstRateThrottle, LoginRateThrottle
 from .serializers import (
     LoginAttemptSerializer,
+    EmailVerificationSerializer,
+    LoginChallengeIssuedSerializer,
     LoginSerializer,
     LogoutSerializer,
     MeUpdateSerializer,
@@ -36,6 +42,7 @@ from .serializers import (
     UserAdminSerializer,
     UserCreateSerializer,
     UserSerializer,
+    VerifyLoginCodeSerializer,
 )
 
 
@@ -44,16 +51,65 @@ from .serializers import (
 # ---------------------------------------------------------------------------
 
 
+class ServiceUnavailable(APIException):
+    """503 — the request was fine, something we depend on is not.
+
+    Used when mail cannot be sent. Not a 500: nothing is broken in the
+    application and there is no bug to report, the mail server is simply not
+    answering. Not a 400 either: the caller did nothing wrong and changing
+    their request will not help.
+    """
+
+    status_code = 503
+    default_detail = "A service this depends on is unavailable. Try again shortly."
+    default_code = "service_unavailable"
+
+
+def _mask_email(email):
+    """"julius@asone.test" -> "j••••s@asone.test".
+
+    Enough for the right person to recognise their own mailbox, not enough
+    to hand somebody else a full address they did not already have.
+    """
+    name, _, domain = email.partition("@")
+    if len(name) <= 2:
+        return f"{name[:1]}•@{domain}"
+    return f"{name[0]}{'•' * (len(name) - 2)}{name[-1]}@{domain}"
+
+
 @extend_schema(
     tags=["Authentication"],
-    summary="Sign in",
+    summary="Sign in — step 1 of 2, password",
+    request=LoginSerializer,
+    responses={200: LoginChallengeIssuedSerializer},
     description=(
-        "Exchange an email address and password for an access token, a "
-        "refresh token and the signed-in user's record, including role, site "
-        "and access summary."
+        "Check an email address and password, then **email a one-time code**. "
+        "No tokens are returned here — post the code to "
+        "`/api/auth/login/verify/` to finish.\n\n"
+        "**403 means the address is not a user of this system**, or has been "
+        "deactivated. Only people Central Office has added can sign in, and "
+        "this says so plainly rather than leaving somebody retyping a "
+        "password that was never going to work.\n\n"
+        "**401 means the password is wrong** for an address that does exist.\n\n"
+        "Both are rate limited per address and per site, and every attempt is "
+        "recorded."
     ),
 )
 class LoginView(TokenObtainPairView):
+    """Step one: prove the password, then be sent a code.
+
+    This used to return tokens. It now returns a challenge, because a
+    password alone is enough to read every school's orders and every
+    warehouse's stock.
+
+    The order of the checks is the interesting part. Access is decided
+    **before** the password is looked at, which is what lets a stranger be
+    told "you do not have access" instead of "wrong password". That is user
+    enumeration, deliberately accepted — see
+    `accounts/services.py::user_with_access` for why, and for when to change
+    it back.
+    """
+
     serializer_class = LoginSerializer
     permission_classes = [AllowAny]
     # Two limits, both of which must pass: per email address, and a looser one per
@@ -64,26 +120,149 @@ class LoginView(TokenObtainPairView):
     def post(self, request, *args, **kwargs):
         email = request.data.get("email") if hasattr(request, "data") else None
 
+        # Deliberately first. A person who was never added is told so,
+        # rather than being sent round the password loop forever.
         try:
-            response = super().post(request, *args, **kwargs)
+            user = services.user_with_access(email)
+        except services.NoAccess as exc:
+            services.record_login_attempt(
+                email=email, user=None, succeeded=False, request=request
+            )
+            raise PermissionDenied(str(exc)) from exc
+
+        try:
+            serializer = self.get_serializer(data=request.data)
+            serializer.is_valid(raise_exception=True)
         except Exception:
             # Recorded before re-raising, so a failure is audited even though
             # the caller only ever sees a 401.
             services.record_login_attempt(
-                email=email,
-                user=User.objects.filter(email__iexact=email or "").first(),
-                succeeded=False,
-                request=request,
+                email=email, user=user, succeeded=False, request=request
             )
             raise
 
+        # The password was right. Before anything else, the address it was
+        # sent to has to have been proven — otherwise a mistyped address
+        # still makes a working account for whoever holds the password.
+        try:
+            services.require_verified_email(user)
+        except services.EmailNotVerified as exc:
+            raise PermissionDenied(str(exc)) from exc
+
+        # Still not a sign-in — it is half of one, and nothing here issues a
+        # token.
+        challenge = services.start_login_challenge(user, request=request)
+
         services.record_login_attempt(
-            email=email,
-            user=User.objects.filter(email__iexact=email or "").first(),
-            succeeded=True,
-            request=request,
+            email=email, user=user, succeeded=True, request=request
         )
-        return response
+
+        return Response(
+            LoginChallengeIssuedSerializer(
+                {
+                    "challenge": challenge.id,
+                    "expires_at": challenge.expires_at,
+                    "email_hint": _mask_email(user.email),
+                    "detail": (
+                        "We have emailed you a sign-in code. It expires in "
+                        f"{settings.LOGIN_CODE_TTL_MINUTES} minutes."
+                    ),
+                }
+            ).data
+        )
+
+
+@extend_schema(
+    tags=["Authentication"],
+    summary="Sign in — step 2 of 2, the emailed code",
+    request=VerifyLoginCodeSerializer,
+    responses={200: LoginSerializer},
+    description=(
+        "Exchange the challenge and the emailed code for an access token, a "
+        "refresh token and the signed-in user's record.\n\n"
+        "A code is good **once**, for a few minutes, with a limited number "
+        "of tries. Anything else — expired, already used, too many wrong "
+        "attempts — is a 400 telling you to sign in again, deliberately "
+        "without saying which of those it was."
+    ),
+)
+class VerifyLoginCodeView(APIView):
+    """Step two: the code from the email, and only then tokens."""
+
+    permission_classes = [AllowAny]
+    serializer_class = VerifyLoginCodeSerializer
+    # Its own budget, keyed the same way as login. Without a limit here the
+    # second factor would be a six-digit number anybody could work through.
+    throttle_classes = [LoginBurstRateThrottle]
+
+    def post(self, request):
+        serializer = VerifyLoginCodeSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        try:
+            user = services.verify_login_code(
+                serializer.validated_data["challenge"],
+                serializer.validated_data["code"],
+            )
+        except services.ChallengeUnusable as exc:
+            raise DRFValidationError({"code": str(exc)}) from exc
+
+        refresh = RefreshToken.for_user(user)
+        return Response(
+            {
+                "refresh": str(refresh),
+                "access": str(refresh.access_token),
+                "user": UserSerializer(user).data,
+            }
+        )
+
+
+@extend_schema(
+    tags=["Authentication"],
+    summary="Confirm your email address",
+    request=EmailVerificationSerializer,
+    responses={200: OpenApiResponse(description="The address is confirmed.")},
+    description=(
+        "A new member of staff confirms the address their account was "
+        "created against, using the code emailed to it.\n\n"
+        "**Until this is done, signing in is refused.** An account is created "
+        "with a password the lead knows and an address nobody has proven; "
+        "this is what proves it. A mistyped address must not become a working "
+        "account.\n\n"
+        "The password is not part of this step and is never emailed — it "
+        "reaches the person through their lead, by a different route. That "
+        "separation is the whole point of the code.\n\n"
+        "Wrong codes count against a limit, and the code expires."
+    ),
+)
+class EmailVerificationView(APIView):
+    """Open, because the caller has no account to authenticate with yet —
+    that is exactly what the code is standing in for."""
+
+    permission_classes = [AllowAny]
+    serializer_class = EmailVerificationSerializer
+    throttle_classes = [LoginRateThrottle, LoginBurstRateThrottle]
+
+    def post(self, request):
+        serializer = EmailVerificationSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        try:
+            services.verify_email(
+                serializer.validated_data["email"], serializer.validated_data["code"]
+            )
+        except services.VerificationUnusable as exc:
+            raise DRFValidationError({"code": str(exc)}) from exc
+
+        return Response(
+            {
+                "detail": (
+                    "Your email address is confirmed. You can now sign in with "
+                    "the password your lead gave you, and you will be asked to "
+                    "replace it."
+                )
+            }
+        )
 
 
 @extend_schema(
@@ -300,21 +479,112 @@ class UserViewSet(viewsets.ModelViewSet):
         ),
     )
     def create(self, request, *args, **kwargs):
+        """Add a member of staff, and email them a confirmation code.
+
+        The password is generated unless the lead types one, and shown back
+        **once** so they can pass it on themselves. It is never emailed. The
+        confirmation code is, and keeping the two on separate routes is what
+        makes holding both mean something.
+
+        The account cannot be signed into until that code is entered.
+        """
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        user, password = services.create_staff_user(**serializer.validated_data)
+        fields = dict(serializer.validated_data)
+        typed_password = fields.pop("password", "") or None
+
+        # Creating the account and sending the code are one operation or
+        # neither.
+        #
+        # Without the transaction, a mail server that is down left an account
+        # nobody could confirm and nobody could recreate: the lead saw an
+        # error, retried, and was told the address already existed. The
+        # account was then stuck and only a developer could clear it. Found
+        # by probing on 5 September 2026, not by a test failing.
+        try:
+            with transaction.atomic():
+                user, password = services.create_staff_user(
+                    password=typed_password, **fields
+                )
+                services.send_email_verification(
+                    user, sent_by=request.user, request=request
+                )
+        except OSError as exc:
+            # Anything the mail library raises for "could not send" —
+            # unreachable host, refused credentials, timeout. The account has
+            # been rolled back, so the lead can simply try again.
+            raise ServiceUnavailable(
+                "The account was not created because the confirmation email "
+                "could not be sent. Nothing has been saved — try again, and "
+                "tell whoever runs the system if it keeps happening."
+            ) from exc
 
         return Response(
             {
                 "user": UserAdminSerializer(user).data,
                 "password": password,
                 "detail": (
-                    "Give these credentials to the user. The password is not "
-                    "stored in readable form and cannot be shown again."
+                    f"Give this password to {user.get_full_name() or user.email} "
+                    "yourself — it is not emailed, and cannot be shown again. A "
+                    f"confirmation code has been emailed to {user.email}; they "
+                    "must enter it before they can sign in, and they will be "
+                    "asked to replace this password once they do."
                 ),
             },
             status=status.HTTP_201_CREATED,
+        )
+
+    @extend_schema(
+        summary="Send the confirmation code again",
+        request=None,
+        responses={200: OpenApiResponse(description="A fresh code was emailed.")},
+        description=(
+            "Emails a **new** confirmation code and retires the old one.\n\n"
+            "Needed more often than it sounds: a code lasts seven days, mail "
+            "goes astray, and people start a new job a fortnight after being "
+            "added. Without this the only fix is a developer.\n\n"
+            "Refused for somebody whose address is already confirmed — there "
+            "is nothing left to prove. If they cannot get in, use **set "
+            "password** instead."
+        ),
+    )
+    @action(detail=True, methods=["post"], url_path="resend-verification")
+    def resend_verification(self, request, pk=None):
+        user = self.get_object()
+
+        if user.email_is_verified:
+            raise DRFValidationError(
+                {
+                    "detail": (
+                        f"{user.get_full_name() or user.email} has already "
+                        "confirmed their address. If they cannot get in, set "
+                        "them a new password instead."
+                    )
+                }
+            )
+        if not user.is_active:
+            raise DRFValidationError(
+                {"detail": "That account is deactivated. Reactivate it first."}
+            )
+
+        try:
+            services.send_email_verification(
+                user, sent_by=request.user, request=request
+            )
+        except OSError as exc:
+            raise ServiceUnavailable(
+                "The code could not be sent. Nothing has changed — try again, "
+                "and tell whoever runs the system if it keeps happening."
+            ) from exc
+
+        return Response(
+            {
+                "detail": (
+                    f"A new confirmation code has been emailed to {user.email}. "
+                    "Any earlier code no longer works."
+                )
+            }
         )
 
     def update(self, request, *args, **kwargs):
