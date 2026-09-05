@@ -340,11 +340,15 @@ class CountCorrectionApi(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
-    def test_a_missing_reason_code_is_a_400_not_a_500(self):
+    def test_a_missing_reason_code_is_a_409_not_a_400_or_a_500(self):
+        """Bashir, 2 September 2026: the request was well formed and nothing
+        the caller could change about it would help — a gap in Central
+        Office's own master data, not invalid input. Same reasoning
+        config/exceptions.py already uses for a refused delete."""
         ReasonCode.objects.filter(code="CORR_UP").delete()
         self.client.force_authenticate(self.finance)
 
         response = self.correct(520)
 
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
         self.assertIn("detail", response.data)

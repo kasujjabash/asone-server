@@ -11,7 +11,7 @@ and nothing else, per AsOne's matrix.
 
 from datetime import date
 
-from drf_spectacular.utils import OpenApiParameter, extend_schema
+from drf_spectacular.utils import OpenApiParameter, OpenApiResponse, extend_schema
 from django.db.models import Prefetch
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
@@ -447,7 +447,11 @@ class InventoryAdjustmentViewSet(viewsets.ModelViewSet):
     @extend_schema(
         summary="Correct a physical count — F24",
         request=CountCorrectionSerializer,
-        responses={200: InventoryAdjustmentSerializer, 201: InventoryAdjustmentSerializer},
+        responses={
+            200: InventoryAdjustmentSerializer,
+            201: InventoryAdjustmentSerializer,
+            409: OpenApiResponse(description="CORR_UP/CORR_DOWN missing or retired."),
+        },
         description=(
             "Compares what was actually counted to what the system thinks "
             "is on hand, and posts the difference — the comparison is done "
@@ -457,12 +461,16 @@ class InventoryAdjustmentViewSet(viewsets.ModelViewSet):
             "draft, unlike the rest of this endpoint). **200** with "
             "`adjustment: null` if the count matched exactly — nothing to "
             "correct, and nothing gets written for it.\n\n"
-            "Refused if the SKU has no catalog price on the count date, if "
-            "the count is short of what is actually on hand (should not "
+            "**400** if the SKU has no catalog price on the count date, or "
+            "if the count is short of what is actually on hand (should not "
             "happen — the comparison is against the same figure — but "
-            "re-checked anyway, same as everywhere else), or if the "
-            "CORR_UP/CORR_DOWN reason code this direction needs does not "
-            "exist or has been retired."
+            "re-checked anyway, same as everywhere else).\n\n"
+            "**409**, not 400, if the CORR_UP/CORR_DOWN reason code this "
+            "direction needs does not exist or has been retired — the "
+            "request itself was fine, and nothing the caller could change "
+            "about it would fix a gap in Central Office's own master data. "
+            "Same reasoning config/exceptions.py already uses for a refused "
+            "delete."
         ),
     )
     @action(detail=False, methods=["post"], url_path="correct-count")
@@ -477,7 +485,10 @@ class InventoryAdjustmentViewSet(viewsets.ModelViewSet):
         except services.NotEnoughStock as exc:
             raise DRFValidationError({"counted_quantity": str(exc)}) from exc
         except services.CorrectionReasonCodeMissing as exc:
-            raise DRFValidationError({"detail": str(exc)}) from exc
+            # 409, not 400: the request was well formed, and nothing the
+            # caller can change about it would help — the same reasoning
+            # config/exceptions.py already applies to a refused delete.
+            return Response({"detail": str(exc)}, status=status.HTTP_409_CONFLICT)
         except PriceNotSet as exc:
             raise DRFValidationError({"sku": str(exc)}) from exc
 
