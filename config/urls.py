@@ -20,6 +20,7 @@ from django.urls import include, path
 from django.views.generic import RedirectView
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
 
+from .health import HealthView
 from .views import ApiRootView
 
 # AsOne asked that the system carry their branding. This covers the admin,
@@ -43,6 +44,7 @@ urlpatterns = [
     path("api/inventory/", include("inventory.urls")),
     path("api/orders/", include("orders.urls")),
     path("api/dashboard/", include("dashboard.urls")),
+    path("api/health/", HealthView.as_view(), name="health"),
     path("api/schema/", SpectacularAPIView.as_view(), name="schema"),
     path(
         "api/docs/",

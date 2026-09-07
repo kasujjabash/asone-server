@@ -215,6 +215,21 @@ SPECTACULAR_SETTINGS = {
     "DESCRIPTION": "Pricing, stock and order system of record for AsOne Logistics.",
     "VERSION": "0.1.0",
     "SERVE_INCLUDE_SCHEMA": False,
+    # Keep the Authorize token across a page reload — development only.
+    #
+    # Swagger UI otherwise holds it in the page's memory alone, so restarting
+    # the server and refreshing the tab looks exactly like being signed out:
+    # the token is still perfectly valid, the page has simply forgotten it.
+    # That is a real nuisance now that signing in again means two calls and
+    # reading a code out of the server's own terminal.
+    #
+    # Off when DEBUG is off, deliberately. Persisting means the token goes
+    # into the browser's localStorage, which is fine on a developer's laptop
+    # and not fine on a shared machine at Central Office.
+    "SWAGGER_UI_SETTINGS": {
+        "persistAuthorization": DEBUG,
+        "displayRequestDuration": True,
+    },
     # Three different things are called a "school level" and they are NOT the
     # same set of values:
     #
