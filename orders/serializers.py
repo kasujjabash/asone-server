@@ -155,9 +155,27 @@ class ShipmentSerializer(serializers.ModelSerializer):
             "shipped_by_name",
             "waybill_number",
             "notes",
+            "received_at",
+            "received_by",
+            "receipt_notes",
             "lines",
         )
         read_only_fields = fields
+
+
+class ConfirmReceiptSerializer(serializers.Serializer):
+    """The school confirming a parcel arrived — F41's other half."""
+
+    shipment = serializers.IntegerField(
+        required=False,
+        help_text="Which shipment. May be omitted when the order has only one.",
+    )
+    notes = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        default="",
+        help_text="Anything wrong — short, damaged, wrong student. Recorded, not acted on.",
+    )
 
 
 class ShipOrderSerializer(serializers.Serializer):

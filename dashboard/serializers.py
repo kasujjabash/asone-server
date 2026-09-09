@@ -152,3 +152,78 @@ class WeeklyReportSerializer(serializers.Serializer):
     rows = WeeklyReportRowSerializer(many=True)
     total_closing_units = serializers.IntegerField()
     total_closing_value = serializers.DecimalField(max_digits=18, decimal_places=2)
+
+
+# ---------------------------------------------------------------------------
+# The school's own dashboard
+# ---------------------------------------------------------------------------
+
+
+class SchoolOrderCountsSerializer(serializers.Serializer):
+    """The school's orders, in the four buckets a school thinks in."""
+
+    awaiting_payment = serializers.IntegerField(
+        help_text="Unpaid invoices. The only bucket the school can still cancel."
+    )
+    in_progress = serializers.IntegerField(
+        help_text="Paid and with the warehouse. Nothing for the school to do."
+    )
+    awaiting_confirmation = serializers.IntegerField(
+        help_text="Shipped, and the school has not said it arrived. The actionable one."
+    )
+    completed = serializers.IntegerField()
+    cancelled = serializers.IntegerField()
+    total = serializers.IntegerField()
+
+
+class DeliveryToConfirmSerializer(serializers.Serializer):
+    """A parcel sent to this school that nobody has confirmed arrived."""
+
+    id = serializers.IntegerField()
+    number = serializers.CharField()
+    order_id = serializers.IntegerField()
+    order_number = serializers.CharField()
+    student_name = serializers.CharField()
+    shipped_on = serializers.DateField()
+    days_in_transit = serializers.IntegerField(
+        help_text="Oldest first — the oldest is the one worth chasing."
+    )
+    from_warehouse = serializers.CharField(
+        help_text="Not always the school's own: a backorder may ship direct from another (D2)."
+    )
+
+
+class SchoolBackorderSerializer(serializers.Serializer):
+    """Something the school ordered that the warehouse could not fill."""
+
+    id = serializers.IntegerField()
+    order_id = serializers.IntegerField()
+    order_number = serializers.CharField()
+    student_name = serializers.CharField()
+    sku_number = serializers.CharField()
+    sku_description = serializers.CharField()
+    quantity = serializers.IntegerField()
+    status = serializers.CharField()
+
+
+class SchoolSiteSerializer(serializers.Serializer):
+    id = serializers.IntegerField()
+    name = serializers.CharField()
+
+
+class SchoolDashboardSerializer(serializers.Serializer):
+    """F62 for a school — everything its screen shows, in one round trip."""
+
+    school = SchoolSiteSerializer()
+    warehouse = SchoolSiteSerializer(
+        allow_null=True,
+        help_text="The warehouse that fills this school's orders. Not a site it controls.",
+    )
+    orders = SchoolOrderCountsSerializer()
+    amount_outstanding = serializers.DecimalField(
+        max_digits=18,
+        decimal_places=2,
+        help_text="The value of the school's unpaid invoices.",
+    )
+    deliveries_to_confirm = DeliveryToConfirmSerializer(many=True)
+    backorders = SchoolBackorderSerializer(many=True)

@@ -37,12 +37,19 @@ class OrderStatus(models.TextChoices):
     open question Q2 ("School Monitor") — but that question decides who
     calls `release_order()`, not what releasing means, so the status is
     reachable and the unknown lives in one permission class.
+
+    SHIPPED and COMPLETED are **not** the same thing, and the gap between
+    them is the point. Shipped means it left the warehouse; completed means
+    the school says it arrived. Everything sitting in that gap is a parcel
+    somebody should be chasing — without the distinction, a delivery that
+    never turned up looks identical to one that did.
     """
 
     HOLD = "HOLD", "On hold — awaiting payment"
     RELEASED = "RELEASED", "Released to the warehouse"
     PICKED = "PICKED", "Picked"
     SHIPPED = "SHIPPED", "Shipped"
+    COMPLETED = "COMPLETED", "Received by the school"
     CANCELLED = "CANCELLED", "Cancelled"
 
 

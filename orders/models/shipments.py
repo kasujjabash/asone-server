@@ -59,6 +59,25 @@ class Shipment(models.Model):
     )
     created_at = models.DateTimeField(auto_now_add=True)
 
+    # Set when the school confirms the parcel arrived — F41's other half.
+    #
+    # On the shipment rather than the order, deliberately. An order can have
+    # two shipments: decision D2 lets a backorder go direct from a different
+    # warehouse. A single flag on the order would let a school confirm the
+    # first parcel and close an order still waiting on the second.
+    received_at = models.DateTimeField(null=True, blank=True)
+    received_by = models.ForeignKey(
+        "accounts.User",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="+",
+    )
+    receipt_notes = models.TextField(
+        blank=True,
+        help_text="Anything wrong with the parcel — short, damaged, wrong student.",
+    )
+
     waybill_number = models.CharField(
         max_length=50,
         blank=True,
@@ -75,6 +94,10 @@ class Shipment(models.Model):
 
     def __str__(self):
         return f"{self.number} from {self.from_warehouse.name}"
+
+    @property
+    def is_received(self) -> bool:
+        return self.received_at is not None
 
     @property
     def total_quantity(self) -> int:

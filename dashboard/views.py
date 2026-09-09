@@ -37,6 +37,7 @@ from .serializers import (
     InventoryByWarehouseSerializer,
     NotificationsSerializer,
     OrderVolumeSerializer,
+    SchoolDashboardSerializer,
     WeeklyReportSerializer,
 )
 
@@ -57,6 +58,21 @@ class CanSeeWarehouseDashboard(BasePermission):
         return has_role(
             request.user, *ALL_SITE_ROLES, Role.FINANCE, Role.WAREHOUSE_STAFF
         )
+
+
+class CanSeeSchoolDashboard(BasePermission):
+    """School staff, and only school staff.
+
+    The mirror of `CanSeeWarehouseDashboard`. Not widened to the leads: this
+    endpoint reads `request.user.school`, so there is nothing for a lead to
+    see through it — a lead wanting a school's position reads the order
+    reports, which are scoped and already theirs.
+    """
+
+    message = "Your role does not have a school dashboard."
+
+    def has_permission(self, request, view) -> bool:
+        return has_role(request.user, Role.SCHOOL_STAFF)
 
 
 class _WarehouseScoped(APIView):
@@ -357,3 +373,60 @@ def _date_param(request, name):
         raise DRFValidationError(
             {name: f"'{raw}' is not a date. Use YYYY-MM-DD."}
         ) from None
+
+
+@extend_schema(tags=["Dashboard"])
+class SchoolDashboardView(APIView):
+    """F62 for a school — the other dashboard.
+
+    Every tile above this one is a warehouse tile: units in bins, SKUs under
+    their floor, what is loading today. A school holds no stock and runs no
+    warehouse, so those figures describe somebody else's building. This
+    endpoint exists so that "the school gets a dashboard too" does not have
+    to mean widening `CanSeeWarehouseDashboard` and handing a school clerk a
+    page of numbers that are not about them.
+
+    What a school is told is the state of its own paperwork: what it owes,
+    what the warehouse is working on, **what has been sent and not
+    confirmed**, and what is stuck on a backorder. The third of those is the
+    only one it can act on, and it is the reason Shipped and Completed are
+    separate statuses.
+
+    Scoped to the caller's own school and nothing else — there is no
+    `?school=` parameter, deliberately. A school clerk has exactly one
+    school, and a lead wanting to look at a school's position has the order
+    reports, which are already scoped and already theirs to read.
+    """
+
+    permission_classes = [*AUTHENTICATED, CanSeeSchoolDashboard]
+
+    @extend_schema(
+        summary="The school's own dashboard",
+        responses=SchoolDashboardSerializer,
+        description=(
+            "Orders by state, what is owed, parcels awaiting confirmation, "
+            "and outstanding backorders — all for the caller's own school.\n\n"
+            "`deliveries_to_confirm` is the actionable list: each row is a "
+            "parcel that left a warehouse and that nobody has said arrived. "
+            "Confirming one is `POST /api/orders/school-orders/{id}/"
+            "confirm-receipt/`, and the order becomes **Completed** once "
+            "every parcel on it is confirmed."
+        ),
+    )
+    def get(self, request):
+        school = request.user.school
+        if school is None:
+            # A school account with no school is a broken account. Saying so
+            # is better than an empty dashboard that looks like a school with
+            # no orders.
+            raise DRFValidationError(
+                {
+                    "school": (
+                        "This account is not attached to a school, so it has "
+                        "no dashboard. Ask a lead to set one."
+                    )
+                }
+            )
+
+        data = services.school_dashboard(school)
+        return Response(SchoolDashboardSerializer(data).data)

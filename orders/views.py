@@ -31,6 +31,7 @@ from . import reports, services
 from .models import Backorder, SchoolOrder, SchoolOrderLine
 from .permissions import (
     CanConfirmPayment,
+    CanConfirmReceipt,
     CanReadBackorderReport,
     CanReadFulfilmentReports,
     CanReadPackingList,
@@ -46,6 +47,7 @@ from .serializers import (
     CancelOrderSerializer,
     FillBackorderSerializer,
     InvoiceSerializer,
+    ConfirmReceiptSerializer,
     ReleaseOrderSerializer,
     ShipOrderSerializer,
     ShipmentSerializer,
@@ -96,6 +98,12 @@ _WAREHOUSE_ACTIONS = frozenset(
 #: open question Q2 — see orders/permissions.py::CanConfirmPayment.
 _PAYMENT_ACTIONS = frozenset({"release"})
 
+#: F41's second half is the school reporting that the parcel turned up. It is
+#: not School Orders Entry — nothing about the document changes — so it does
+#: not belong behind a permission whose refusal talks about placing orders.
+#: Its own class is also where Q7 lands if schools cannot get online.
+_RECEIPT_ACTIONS = frozenset({"confirm_receipt"})
+
 
 @extend_schema(tags=["Orders — point of sale"])
 class SchoolOrderViewSet(viewsets.ModelViewSet):
@@ -124,9 +132,25 @@ class SchoolOrderViewSet(viewsets.ModelViewSet):
     """
 
     permission_classes = [*AUTHENTICATED, SchoolOrderAccess]
-    # F34 gives Finance a view of the invoice. Placing and cancelling stay
-    # School Staff only — SchoolOrderAccess splits read from write.
-    read_roles = (User.Role.FINANCE,)
+    # SchoolOrderAccess splits read from write, and this is the read half.
+    # Placing, amending and cancelling stay School Staff only.
+    #
+    # F34 gives Finance a view of the invoice. The leads are here for the
+    # same reason: they already read every report derived from these orders
+    # — on-hold (F53), part-processed, backorders, costed shipments — so
+    # denying them the list those are drawn from is inconsistent rather than
+    # protective. The matrix column this viewset guards is School Orders
+    # *Entry*, which is unchanged: neither lead can place, amend or cancel.
+    #
+    # NOTE: this widens what AsOne's printed matrix (p.9) shows, which leaves
+    # the leads' cell blank. Requested by ERA 92 on 9 September 2026 and
+    # still needs AsOne's written confirmation — until it has that, this is
+    # the one place the code and the matrix disagree on purpose.
+    read_roles = (
+        User.Role.FINANCE,
+        User.Role.PROGRAM_LEAD,
+        User.Role.OPERATIONS_MANAGER,
+    )
     filterset_fields = ("status", "order_date")
     search_fields = ("number", "student_name")
     http_method_names = ["get", "post", "patch", "head", "options"]
@@ -138,6 +162,8 @@ class SchoolOrderViewSet(viewsets.ModelViewSet):
             return [permission() for permission in [*AUTHENTICATED, CanReceiveAndShip]]
         if self.action in _PAYMENT_ACTIONS:
             return [permission() for permission in [*AUTHENTICATED, CanConfirmPayment]]
+        if self.action in _RECEIPT_ACTIONS:
+            return [permission() for permission in [*AUTHENTICATED, CanConfirmReceipt]]
         if self.action == "packing_lists":
             # F40 leaves the School Staff cell blank — see CanReadPackingList,
             # which explains why that is worth querying with AsOne.
@@ -445,6 +471,70 @@ class SchoolOrderViewSet(viewsets.ModelViewSet):
             "from_warehouse", "order", "shipped_by"
         ).prefetch_related("lines__sku")
         return Response(ShipmentSerializer(rows, many=True).data)
+
+    @extend_schema(
+        summary="Confirm a parcel arrived",
+        request=ConfirmReceiptSerializer,
+        responses={200: ShipmentSerializer},
+        description=(
+            "The school says the shipment arrived. The order becomes "
+            "**Completed** once every shipment on it is confirmed — an order "
+            "can have two, because a backorder may ship direct from another "
+            "warehouse (D2).\n\n"
+            "**This does not touch stock.** It left at ship and stays gone. "
+            "Recording it here instead would mean stock the warehouse has "
+            "physically handed to a driver still counting as theirs.\n\n"
+            "`shipment` may be omitted when the order has only one.\n\n"
+            "`notes` is for what was wrong — short, damaged, wrong student. "
+            "It is recorded and nothing acts on it: what to *do* about a bad "
+            "delivery is a question AsOne has not answered."
+        ),
+    )
+    @action(detail=True, methods=["post"], url_path="confirm-receipt")
+    def confirm_receipt(self, request, pk=None):
+        order = self.get_object()
+
+        serializer = ConfirmReceiptSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        shipment_id = serializer.validated_data.get("shipment")
+        outstanding = order.shipments.all()
+
+        if shipment_id is not None:
+            shipment = outstanding.filter(pk=shipment_id).first()
+            if shipment is None:
+                raise DRFValidationError(
+                    {"shipment": "That shipment does not belong to this order."}
+                )
+        elif outstanding.count() == 1:
+            shipment = outstanding.first()
+        elif not outstanding:
+            raise DRFValidationError(
+                {"shipment": f"{order.number} has not been shipped yet."}
+            )
+        else:
+            # Guessing which of several parcels arrived would silently
+            # complete the wrong one.
+            raise DRFValidationError(
+                {
+                    "shipment": (
+                        f"{order.number} has {outstanding.count()} shipments. "
+                        "Say which one arrived."
+                    )
+                }
+            )
+
+        try:
+            services.confirm_receipt(
+                shipment,
+                confirmed_by=request.user,
+                notes=serializer.validated_data["notes"],
+            )
+        except services.CannotConfirmReceipt as exc:
+            raise DRFValidationError({"shipment": str(exc)}) from exc
+
+        shipment.refresh_from_db()
+        return Response(ShipmentSerializer(shipment).data)
 
     @extend_schema(
         summary="Packing lists for this order",

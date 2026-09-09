@@ -725,3 +725,171 @@ def _sku_and_warehouse_names(keys):
         }
         for key in keys
     }
+
+
+# ---------------------------------------------------------------------------
+# The school's own dashboard
+# ---------------------------------------------------------------------------
+#
+# Everything above this line answers a warehouse question: units in bins,
+# SKUs under their floor, what is loading today. A school has none of those —
+# it holds no stock — so pointing it at those tiles would give it a page of
+# figures about somebody else's building.
+#
+# What a school actually needs is the state of its own paperwork: what it
+# owes, what is coming, what turned up, and what is stuck. Every number below
+# is that school's and no other's.
+
+
+def school_order_counts(school):
+    """The school's orders, grouped the way its screen asks the question.
+
+    Not `values("status").annotate(...)` over the raw statuses, because the
+    school does not think in five statuses — it thinks in "what do I owe",
+    "what is coming", "what should I check for", "what is done". Released and
+    Picked are one answer to a school: the warehouse has it.
+    """
+    counts = dict(
+        SchoolOrder.objects.filter(school=school)
+        .values_list("status")
+        .annotate(n=Count("id"))
+    )
+
+    def at(*statuses):
+        return sum(counts.get(status, 0) for status in statuses)
+
+    return {
+        # What the school owes money on. The only bucket it can act on by
+        # paying, and the only one that can still be cancelled.
+        "awaiting_payment": at(OrderStatus.HOLD),
+        # Paid and with the warehouse. Nothing for the school to do but wait.
+        "in_progress": at(OrderStatus.RELEASED, OrderStatus.PICKED),
+        # Left the warehouse, not yet confirmed by the school. **This is the
+        # actionable one** — every row here is a parcel somebody should be
+        # looking for, and it is the tile that makes the Shipped/Completed
+        # split worth having.
+        "awaiting_confirmation": at(OrderStatus.SHIPPED),
+        "completed": at(OrderStatus.COMPLETED),
+        "cancelled": at(OrderStatus.CANCELLED),
+        "total": sum(counts.values()),
+    }
+
+
+def school_amount_outstanding(school):
+    """What the school still owes — the value of its unpaid invoices.
+
+    Hold is the unpaid state: releasing an order *is* the payment
+    confirmation. Cancelled orders are excluded because a void invoice is
+    not a debt, and everything past Hold has been paid for.
+
+    Summed in the database rather than in Python: the same reasoning as
+    every other money figure here, and it keeps a school with a long history
+    from pulling its whole order book across to add it up.
+    """
+    total = (
+        SchoolOrderLine.objects.filter(
+            order__school=school, order__status=OrderStatus.HOLD
+        )
+        .annotate(
+            line=Coalesce(
+                F("quantity") * F("unit_price"), Value(Decimal("0.00")), output_field=MONEY
+            )
+        )
+        .aggregate(total=Coalesce(Sum("line"), Value(Decimal("0.00")), output_field=MONEY))
+    )
+    return total["total"]
+
+
+def school_deliveries_to_confirm(school):
+    """Parcels sent to this school that nobody has said arrived.
+
+    The school's to-do list, and the reason `confirm_receipt()` exists. A
+    shipment that left three weeks ago and never turned up is invisible
+    without this — it looks exactly like one that arrived safely.
+
+    `days_in_transit` is here rather than computed on the client so that the
+    ordering and the number agree: oldest first, because the oldest is the
+    one worth chasing.
+    """
+    today = timezone.localdate()
+
+    shipments = (
+        Shipment.objects.filter(order__school=school, received_at__isnull=True)
+        .exclude(order__status=OrderStatus.CANCELLED)
+        .select_related("order", "from_warehouse")
+        .order_by("shipped_on")
+    )
+
+    return [
+        {
+            "id": shipment.id,
+            "number": shipment.number,
+            "order_id": shipment.order_id,
+            "order_number": shipment.order.number,
+            "student_name": shipment.order.student_name,
+            "shipped_on": shipment.shipped_on,
+            "days_in_transit": (today - shipment.shipped_on).days,
+            # Usually the school's own warehouse — but a backorder may be
+            # filled by another one shipping direct (D2), and a school
+            # expecting a parcel from Namayemba should not be confused by one
+            # arriving from Serere.
+            "from_warehouse": shipment.from_warehouse.name,
+        }
+        for shipment in shipments
+    ]
+
+
+def school_backorders(school):
+    """What the school ordered that the warehouse could not fill.
+
+    The answer to the question a school gets asked by a parent: it is not
+    that the order was lost, it is that the shirt is not made yet.
+    """
+    backorders = (
+        Backorder.objects.filter(order__school=school)
+        .exclude(status=BackorderStatus.FILLED)
+        .select_related("sku", "order")
+        .order_by("order__order_date")
+    )
+
+    return [
+        {
+            "id": backorder.id,
+            "order_id": backorder.order_id,
+            "order_number": backorder.order.number,
+            "student_name": backorder.order.student_name,
+            "sku_number": backorder.sku.number,
+            "sku_description": backorder.sku.description,
+            "quantity": backorder.quantity,
+            "status": backorder.status,
+        }
+        for backorder in backorders
+    ]
+
+
+def school_dashboard(school):
+    """Everything the school's screen shows, in one round trip.
+
+    One endpoint rather than five, because unlike the warehouse dashboard
+    none of these is expensive and none of them is separately forbidden —
+    they are all the same school's rows, so splitting them would buy nothing
+    and cost four requests.
+    """
+    return {
+        "school": {"id": school.id, "name": school.name},
+        # The warehouse that serves them. A school reads stock levels there
+        # and nowhere else — it is not a site they control, it is the one
+        # their orders are filled from.
+        "warehouse": (
+            {
+                "id": school.primary_warehouse_id,
+                "name": school.primary_warehouse.name,
+            }
+            if school.primary_warehouse_id
+            else None
+        ),
+        "orders": school_order_counts(school),
+        "amount_outstanding": school_amount_outstanding(school),
+        "deliveries_to_confirm": school_deliveries_to_confirm(school),
+        "backorders": school_backorders(school),
+    }

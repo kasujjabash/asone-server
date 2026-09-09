@@ -80,6 +80,39 @@ class CanConfirmPayment(BasePermission):
         return has_role(request.user, *self.roles)
 
 
+class CanConfirmReceipt(BasePermission):
+    """Who says a parcel arrived — the second half of F41.
+
+    **The school**, and only the school. AsOne's chart has the shipment
+    landing at the school and the school checking it against the invoice
+    number and the student's name, so the person who can honestly say it
+    turned up is the person holding it.
+
+    This is a separate class from `SchoolOrderAccess` even though the
+    audience is identical today, for two reasons. Confirming a delivery is
+    not the School Orders *Entry* column — it is not placing or amending a
+    document, it is reporting a fact about one — so a denial should not say
+    "only school staff can place or change a school order". And it is the
+    likeliest of these to move: open question Q7 asks whether every school
+    has a working computer, and if the answer is no, somebody at Central
+    Office confirms on their behalf and their role is added here alone.
+
+    Deliberately *not* the warehouse: a warehouse confirming its own
+    delivery arrived closes the very gap the completion step exists to
+    open — see `confirm_receipt()` on why shipped and completed are not the
+    same fact.
+    """
+
+    message = (
+        "Only the school receiving a shipment can confirm it arrived."
+    )
+
+    roles = frozenset({Role.SCHOOL_STAFF})
+
+    def has_permission(self, request, view) -> bool:
+        return has_role(request.user, *self.roles)
+
+
 class CanReadBackorderReport(BasePermission):
     """F49 — outstanding backorders. The widest of the fulfilment reports.
 

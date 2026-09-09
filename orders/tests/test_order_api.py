@@ -86,14 +86,30 @@ class OnlySchoolStaffReachThePointOfSale(OrderApiSetup):
             status.HTTP_200_OK,
         )
 
-    def test_the_leads_may_not(self):
-        """Deliberate, and easy to assume otherwise — the leads see almost
-        everything else."""
+    def test_the_leads_may_read_but_not_place(self):
+        """Reading is not acting — the same split Finance gets under F34.
+
+        This used to assert 403 on the read as well, matching AsOne's printed
+        matrix (p.9), which leaves the School Orders Entry cell blank for both
+        leads. Widened at ERA 92's request on 9 September 2026: a lead already
+        reads every report derived from these orders — on-hold (F53),
+        part-processed, backorders, costed shipments — so refusing them the
+        list those are built from was inconsistent rather than protective.
+
+        **Still needs AsOne's written confirmation.** If they say no, restore
+        the 403 here and narrow `read_roles` in orders/views.py to Finance.
+
+        Placing is untouched and still refused.
+        """
         for user in (self.lead, make_user("andrew", Role.OPERATIONS_MANAGER)):
             with self.subTest(user=user.email):
                 self.client.force_authenticate(user)
                 self.assertEqual(
                     self.client.get(reverse("orders:school-order-list")).status_code,
+                    status.HTTP_200_OK,
+                )
+                self.assertEqual(
+                    self.place(user=user).status_code,
                     status.HTTP_403_FORBIDDEN,
                 )
 

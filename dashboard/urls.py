@@ -8,6 +8,9 @@ app_name = "dashboard"
 
 urlpatterns = [
     path("summary/", views.SummaryView.as_view(), name="summary"),
+    # The school's dashboard is a different screen with different numbers —
+    # not this one with a wider audience. See dashboard/views.py.
+    path("school/", views.SchoolDashboardView.as_view(), name="school"),
     path("attention/", views.AttentionView.as_view(), name="attention"),
     path("activity/", views.ActivityView.as_view(), name="activity"),
     path("order-volume/", views.OrderVolumeView.as_view(), name="order-volume"),

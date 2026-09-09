@@ -104,6 +104,25 @@ DATABASES = {
         "PASSWORD": os.environ["POSTGRES_PASSWORD"],
         "HOST": os.environ.get("POSTGRES_HOST", "localhost"),
         "PORT": os.environ.get("POSTGRES_PORT", "5432"),
+        # Each test run gets its own database.
+        #
+        # Django names the test database after the real one, so two runs on
+        # one machine share a single `test_asone_logistics` — and whichever
+        # finishes first drops it out from under the other. Every failure
+        # that produces looks like a code failure and is not one.
+        #
+        # Not hypothetical: it happened on 10 September 2026 with two agents
+        # working in this repo at once, and cost an hour of chasing errors
+        # in code that was fine.
+        #
+        # The process id makes the name unique per run. `--parallel` still
+        # works: Django appends its own suffix on top of this.
+        #
+        # The cost is orphans — a run killed rather than finished leaves its
+        # database behind. `manage.py drop_stale_test_dbs` clears them.
+        "TEST": {
+            "NAME": f"test_{os.environ['POSTGRES_DB']}_{os.getpid()}",
+        },
     }
 }
 
@@ -175,7 +194,9 @@ REST_FRAMEWORK = {
     # Model-level rules raise Django's ValidationError, which DRF would
     # otherwise let escape as a 500. See config/exceptions.py.
     "EXCEPTION_HANDLER": "config.exceptions.exception_handler",
-    "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
+    # Ours rather than DRF's, so a screen can ask for the page size its
+    # design calls for — capped, so nobody can ask for the whole table.
+    "DEFAULT_PAGINATION_CLASS": "config.pagination.SizedPageNumberPagination",
     "PAGE_SIZE": 50,
     # Throttling is scoped rather than global: ordinary API traffic from a busy
     # warehouse should never be slowed, but the endpoints that accept a

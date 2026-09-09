@@ -209,3 +209,82 @@ def packing_list_for(shipment):
         ],
         "total_units": sum(line.quantity for line in lines),
     }
+
+
+class CannotConfirmReceipt(Exception):
+    """The shipment is not in a state where arrival can be confirmed."""
+
+
+@transaction.atomic
+def confirm_receipt(shipment, *, confirmed_by, notes=""):
+    """The school says the parcel arrived — the other half of F41.
+
+    ## Why this is a separate step from shipping
+
+    Shipped means it left the warehouse. Completed means it got there. Those
+    are different facts and the gap between them is the useful part: a
+    parcel that left Namayemba three weeks ago and never arrived is
+    invisible without it, and that gap is where losses live.
+
+    **This does not touch the ledger.** Stock left at ship and stays gone.
+    Moving it here would mean stock the warehouse has physically handed to a
+    driver still counting as theirs for days — long enough for two
+    warehouses to promise the same shirts.
+
+    ## When the order completes
+
+    Only once **every** shipment on it is confirmed. An order can have two:
+    decision D2 lets a backorder go direct from a warehouse that is not the
+    school's own. Completing on the first confirmation would close an order
+    still waiting on a parcel.
+
+    `notes` is for what was wrong — short, damaged, the wrong student. It is
+    recorded and nothing acts on it: what to *do* about a bad delivery is a
+    question AsOne has not answered, and inventing a process would be worse
+    than leaving the note for a person to read.
+    """
+    if shipment.is_received:
+        raise CannotConfirmReceipt(
+            f"{shipment.number} was already confirmed on {shipment.received_at:%d %b %Y}."
+        )
+    if shipment.order.status == OrderStatus.CANCELLED:
+        raise CannotConfirmReceipt(
+            f"{shipment.order.number} is cancelled."
+        )
+
+    shipment.received_at = timezone.now()
+    shipment.received_by = confirmed_by
+    shipment.receipt_notes = notes.strip()
+    shipment.save(update_fields=["received_at", "received_by", "receipt_notes"])
+
+    order = shipment.order
+    outstanding = order.shipments.filter(received_at__isnull=True).exists()
+    if not outstanding:
+        order.status = OrderStatus.COMPLETED
+        order.save(update_fields=["status"])
+
+    return shipment
+
+
+def shipments_awaiting_confirmation(warehouse=None, school=None, older_than_days=None):
+    """What left the warehouse and nobody has confirmed arrived.
+
+    The report the completion step exists to make possible. `older_than_days`
+    narrows it to the ones actually worth chasing — everything shipped this
+    morning is unconfirmed and none of it is a problem yet.
+    """
+    from datetime import timedelta
+
+    shipments = Shipment.objects.filter(received_at__isnull=True).select_related(
+        "order", "order__school", "from_warehouse"
+    ).exclude(order__status=OrderStatus.CANCELLED)
+
+    if warehouse is not None:
+        shipments = shipments.filter(from_warehouse=warehouse)
+    if school is not None:
+        shipments = shipments.filter(order__school=school)
+    if older_than_days is not None:
+        cutoff = timezone.now().date() - timedelta(days=older_than_days)
+        shipments = shipments.filter(shipped_on__lte=cutoff)
+
+    return shipments.order_by("shipped_on")

@@ -31,12 +31,15 @@ from .backorders import (
     warehouses_that_could_fill,
 )
 from .shipping import (
+    CannotConfirmReceipt,
     NothingToShip,
     OrderCannotBeShipped,
     next_shipment_number,
     packing_list_for,
     picked_stock_for,
     ship_order,
+    shipments_awaiting_confirmation,
+    confirm_receipt,
 )
 from .pos import (
     CannotCancel,
@@ -63,6 +66,7 @@ __all__ = [
     "CannotAssign",
     "NoStockToFill",
     "NothingToPick",
+    "CannotConfirmReceipt",
     "NothingToShip",
     "OrderCannotBeShipped",
     "OrderNotFillable",
@@ -85,5 +89,7 @@ __all__ = [
     "picked_stock_for",
     "place_order",
     "release_order",
+    "confirm_receipt",
     "ship_order",
+    "shipments_awaiting_confirmation",
 ]
