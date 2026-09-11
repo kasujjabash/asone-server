@@ -329,16 +329,30 @@ def outstanding_on_order(production_order):
     still checking, not goods the warehouse can rely on.
     """
     received = defaultdict(int)
+    # What the Tailoring Center's paperwork claimed it sent, which is not
+    # the same fact as what was counted off the van — that difference is the
+    # whole of F20. Reported alongside so a manifest can show both.
+    shipped = defaultdict(int)
+
     for line in ReceiptLine.objects.filter(
         receipt__production_order=production_order,
         receipt__posted_at__isnull=False,
     ).select_related("sku"):
         received[line.sku_id] += line.quantity_received
+        # A packing list that named no quantity says nothing about what was
+        # sent, so the count stands in — treating it as zero would report a
+        # delivery that arrived as never having left.
+        shipped[line.sku_id] += (
+            line.quantity_on_packing_list
+            if line.quantity_on_packing_list is not None
+            else line.quantity_received
+        )
 
     return [
         {
             "sku": line.sku,
             "ordered": line.quantity,
+            "shipped": shipped.get(line.sku_id, 0),
             "received": received.get(line.sku_id, 0),
             "outstanding": line.quantity - received.get(line.sku_id, 0),
         }

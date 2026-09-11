@@ -187,6 +187,27 @@ class ProductionOrderSerializer(serializers.ModelSerializer):
     created_by_name = serializers.CharField(source="created_by.get_full_name", read_only=True)
     total_quantity = serializers.IntegerField(read_only=True)
     total_value = serializers.DecimalField(max_digits=16, decimal_places=2, read_only=True)
+    # How much has actually arrived, which is a different question from the
+    # document's own status — see ProductionOrder.fulfilment_status.
+    quantity_received = serializers.IntegerField(read_only=True)
+    fulfilment_status = serializers.CharField(read_only=True)
+    fulfilment_status_display = serializers.SerializerMethodField()
+    line_count = serializers.SerializerMethodField()
+
+    FULFILMENT_LABELS = {
+        "AWAITING": "Awaiting delivery",
+        "PARTIAL": "Partially received",
+        "RECEIVED": "Received",
+        "CLOSED": "Closed",
+        "CANCELLED": "Cancelled",
+    }
+
+    def get_fulfilment_status_display(self, order) -> str:
+        return self.FULFILMENT_LABELS.get(order.fulfilment_status, order.fulfilment_status)
+
+    def get_line_count(self, order) -> int:
+        """How many SKUs are on it — the design's "6 SKUs" column."""
+        return len(order.lines.all())
 
     class Meta:
         model = ProductionOrder
@@ -208,8 +229,12 @@ class ProductionOrderSerializer(serializers.ModelSerializer):
             "created_by_name",
             "created_at",
             "lines",
+            "line_count",
             "total_quantity",
             "total_value",
+            "quantity_received",
+            "fulfilment_status",
+            "fulfilment_status_display",
         )
         read_only_fields = ("id", "number", "created_by", "created_at")
 
@@ -334,6 +359,7 @@ class ReceiptSerializer(serializers.ModelSerializer):
             "warehouse_name",
             "tailoring_center_name",
             "packing_list_number",
+            "carrier_name",
             "date_received",
             "notes",
             "posted_at",
@@ -357,6 +383,7 @@ class ReceiptWriteSerializer(serializers.ModelSerializer):
         fields = (
             "production_order",
             "packing_list_number",
+            "carrier_name",
             "date_received",
             "notes",
             "lines",
@@ -380,12 +407,26 @@ class ReceiptWriteSerializer(serializers.ModelSerializer):
 
 
 class OutstandingRowSerializer(serializers.Serializer):
-    """One SKU on an order: ordered, received so far, still to come."""
+    """One SKU on an order: ordered, received so far, still to come.
 
+    `sku` is the id, because the receiving screen posts these rows straight
+    back as receipt lines — without it the client would have to match on the
+    SKU number, which is a display string.
+    """
+
+    # An IntegerField over the id rather than PrimaryKeyRelatedField: on a
+    # plain Serializer the latter has no queryset to infer from, so the
+    # generated schema types it as a string and the client cannot key a
+    # lookup on it.
+    sku = serializers.IntegerField(source="sku.id")
     sku_number = serializers.CharField(source="sku.number")
     sku_description = serializers.CharField(source="sku.description")
+    sku_size = serializers.CharField(source="sku.size.name")
     ordered = serializers.IntegerField()
-    received = serializers.IntegerField()
+    shipped = serializers.IntegerField(
+        help_text="What the TC's packing lists claimed they sent, across posted receipts."
+    )
+    received = serializers.IntegerField(help_text="What was actually counted.")
     outstanding = serializers.IntegerField()
 
 

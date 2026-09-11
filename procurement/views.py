@@ -197,7 +197,10 @@ class ProductionOrderViewSet(OrderViewSetMixin, viewsets.ModelViewSet):
                 queryset=ProductionOrderLine.objects.select_related(
                     "sku", "sku__garment"
                 ),
-            )
+            ),
+            # `fulfilment_status` sums posted receipt lines in Python. Without
+            # this the list is two queries per row.
+            "receipts__lines",
         )
         # A permission class opens the screen; only this stops a Namayemba
         # clerk reading Serere's orders.
@@ -249,7 +252,7 @@ class OpenProductionOrderView(APIView):
         queryset = scope_to_user_site(
             ProductionOrder.objects.select_related(
                 "tailoring_center", "warehouse", "group_order", "created_by"
-            ).prefetch_related("lines__sku"),
+            ).prefetch_related("lines__sku", "receipts__lines"),
             request.user,
             warehouse_field="warehouse",
         )

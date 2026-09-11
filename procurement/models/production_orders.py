@@ -19,7 +19,7 @@ because they are genuinely different sites.
 
 from django.db import models
 
-from .base import OrderDocument, OrderLine
+from .base import OrderDocument, OrderLine, OrderStatus
 
 
 class ProductionOrder(OrderDocument):
@@ -59,6 +59,52 @@ class ProductionOrder(OrderDocument):
             # open-orders view filters on status — both are hot paths.
             models.Index(fields=["warehouse", "status"]),
         ]
+
+    @property
+    def quantity_received(self) -> int:
+        """Units counted in against this order, across **posted** receipts.
+
+        Unposted receipts are excluded for the same reason
+        `outstanding_on_order()` excludes them: an unposted receipt is
+        paperwork somebody is still checking, not goods the warehouse can
+        rely on.
+
+        Summed in Python over prefetched rows rather than annotated, to match
+        `total_quantity` above — the viewset prefetches `receipts__lines`, so
+        this costs no extra query.
+        """
+        return sum(
+            line.quantity_received
+            for receipt in self.receipts.all()
+            if receipt.posted_at is not None
+            for line in receipt.lines.all()
+        )
+
+    @property
+    def fulfilment_status(self) -> str:
+        """How far along delivery is — derived, not stored.
+
+        **This is not `status`.** `status` is the document's own state, and
+        AsOne gave it three values: Open, Closed, Cancelled. The screens want
+        to know something else — how much has actually turned up — and that
+        is a fact about receipts, not about the order.
+
+        Deliberately silent about the Tailoring Center's own workflow. A
+        design mock shows "Draft", "Submitted", "In Production" and "Ready to
+        Ship"; none of those are knowable here, because **Tailoring Centers
+        are not system users** — nobody at a TC types anything, and the first
+        the system hears of a production run is a van at the gate. Inventing
+        those states would mean showing a status nothing can ever update.
+        """
+        if self.status == OrderStatus.CANCELLED:
+            return "CANCELLED"
+        if self.status == OrderStatus.CLOSED:
+            return "CLOSED"
+
+        received = self.quantity_received
+        if received <= 0:
+            return "AWAITING"
+        return "RECEIVED" if received >= self.total_quantity else "PARTIAL"
 
     def save(self, *args, **kwargs):
         if not self.number:

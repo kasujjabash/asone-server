@@ -54,6 +54,17 @@ class Receipt(models.Model):
         max_length=60,
         help_text="From the TC's handwritten packing list, exactly as written.",
     )
+    # Who drove it. Not on AsOne's checklist, and worth having anyway: when
+    # a delivery is short, the first question the warehouse asks is who
+    # brought it. Free text and optional for the same reason the packing
+    # list number is free text — it is copied off a sheet of paper, and a
+    # clerk who was not told a name must still be able to record the goods.
+    carrier_name = models.CharField(
+        max_length=120,
+        blank=True,
+        help_text="The carrier or driver who delivered it, as given at the gate.",
+    )
+
     date_received = models.DateField()
     notes = models.TextField(blank=True)
 

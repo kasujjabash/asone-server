@@ -52,6 +52,10 @@ INSTALLED_APPS = [
     "corsheaders",
     "rest_framework_simplejwt.token_blacklist",
     # ours
+    # config itself, only so its management commands are discovered — it has
+    # no models. drop_stale_test_dbs lives there because it belongs to the
+    # project rather than to any one app.
+    "config",
     "accounts",
     "catalog",
     "inventory",
