@@ -242,7 +242,7 @@ def fill_backorder(backorder, *, filled_by, shipped_on=None, waybill_number="", 
     unit_value = average_unit_value(sku, warehouse)
 
     shipment = Shipment.objects.create(
-        order=backorder.order,
+        school=backorder.order.school,
         from_warehouse=warehouse,
         shipped_on=shipped_on,
         shipped_by=filled_by,
@@ -266,7 +266,11 @@ def fill_backorder(backorder, *, filled_by, shipped_on=None, waybill_number="", 
         occurred_on=shipped_on, created_by=filled_by,
     )
 
-    ShipmentLine.objects.create(shipment=shipment, sku=sku, quantity=quantity)
+    # The line names the order, not the shipment — a backorder filled direct
+    # is a one-order van, but it is the same shape as a consolidated one.
+    ShipmentLine.objects.create(
+        shipment=shipment, order=backorder.order, sku=sku, quantity=quantity
+    )
 
     backorder.status = BackorderStatus.FILLED
     backorder.save(update_fields=["status"])

@@ -58,6 +58,25 @@ class OrderStatus(models.TextChoices):
 SCHOOL_ORDER_STATUS_CHOICES = OrderStatus.choices
 
 
+class OrderPriority(models.TextChoices):
+    """How urgently an order should be picked.
+
+    **Not in AsOne's pack.** It appears in the picking-queue design and
+    nowhere in the checklist, the definitions page or the open questions, so
+    it is carried at the mildest reading: a hint the warehouse sets to order
+    its own day, never anything the system acts on. Nothing schedules,
+    escalates or reorders a queue by it.
+
+    Worth confirming with AsOne before anything is built that depends on it —
+    if it should drive FIFO release (F43), that is a different feature with
+    different consequences.
+    """
+
+    NORMAL = "NORMAL", "Normal"
+    HIGH = "HIGH", "High"
+    URGENT = "URGENT", "Urgent"
+
+
 class SchoolOrder(models.Model):
     """One student's uniform order, placed by their school.
 
@@ -91,6 +110,14 @@ class SchoolOrder(models.Model):
         max_length=12, choices=OrderStatus.choices, default=OrderStatus.HOLD
     )
     notes = models.TextField(blank=True)
+
+    # See OrderPriority: a warehouse hint, not a scheduling rule.
+    priority = models.CharField(
+        max_length=8,
+        choices=OrderPriority.choices,
+        default=OrderPriority.NORMAL,
+        help_text="A picking hint for the warehouse. Nothing in the system acts on it.",
+    )
 
     created_by = models.ForeignKey(
         "accounts.User", on_delete=models.PROTECT, related_name="+"
@@ -159,6 +186,22 @@ class SchoolOrder(models.Model):
         the fact, not something the school chooses here.
         """
         return self.school.primary_warehouse
+
+    @property
+    def shipments(self):
+        """Every despatch carrying part of this order.
+
+        A property rather than a related manager since F42: a shipment is
+        addressed to a *school* and carries several orders, so the link runs
+        through the lines. Reads like the old related name on purpose —
+        `order.shipments.filter(...)` still means what it always did.
+
+        Distinct, because an order with three SKUs on one van must not count
+        that van three times.
+        """
+        from orders.models.shipments import Shipment
+
+        return Shipment.objects.filter(lines__order=self).distinct()
 
     @property
     def is_cancelled(self) -> bool:

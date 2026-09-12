@@ -26,12 +26,26 @@ F52 not at all. Kept separate for that reason alone, and sharing one query
 so they cannot drift apart.
 """
 
-from django.db.models import Count, DecimalField, F, Sum, Value
+from django.db.models import (
+    Case,
+    Count,
+    DecimalField,
+    F,
+    IntegerField,
+    Sum,
+    Value,
+    When,
+)
 from django.db.models.functions import Coalesce
 
 from .models import Backorder, Shipment
 from .models.backorders import BackorderStatus
-from .models.school_orders import OrderStatus, SchoolOrder, SchoolOrderLine
+from .models.school_orders import (
+    OrderPriority,
+    OrderStatus,
+    SchoolOrder,
+    SchoolOrderLine,
+)
 
 MONEY = DecimalField(max_digits=18, decimal_places=2)
 
@@ -87,6 +101,79 @@ def outstanding_backorders(warehouse=None, school=None):
 # ---------------------------------------------------------------------------
 
 
+def picking_queue(warehouse=None):
+    """Orders waiting for the warehouse to pull them off the shelves — F38.
+
+    The picking screen's backlog. Three buckets, and the middle one of the
+    design's is missing on purpose:
+
+        Ready       released, paid for, nothing picked yet
+        Picked      off the shelf and reserved, waiting for a van
+        (In progress)  does not exist — `pick_order` is atomic. An order is
+                    picked or it is not; there is no half-picked state,
+                    because a partial reservation would let the ledger say
+                    stock is committed to an order nobody finished.
+
+    Whether picking *should* be resumable is open question Q4 ("can an order
+    be part-shipped?"), which AsOne has not answered. Until they do, a
+    half-picked state would be a status nothing can reach.
+    """
+    queryset = (
+        SchoolOrder.objects.filter(
+            status__in=(OrderStatus.RELEASED, OrderStatus.PICKED)
+        )
+        .select_related("school", "school__primary_warehouse", "created_by")
+        .prefetch_related("lines__sku")
+    )
+
+    if warehouse is not None:
+        queryset = queryset.filter(school__primary_warehouse=warehouse)
+
+    # Most urgent first, then oldest — a warehouse works the top of this list
+    # down, and the priority is the hint it sets for itself.
+    return queryset.annotate(
+        urgency=Case(
+            When(priority=OrderPriority.URGENT, then=Value(0)),
+            When(priority=OrderPriority.HIGH, then=Value(1)),
+            default=Value(2),
+            output_field=IntegerField(),
+        )
+    ).order_by("urgency", "order_date", "number")
+
+
+def picking_summary(warehouse=None, today=None):
+    """The three tiles above the backlog.
+
+    `completed_today` counts orders **picked** today, not shipped: the
+    warehouse is measuring its own day's work off the shelves, and a van may
+    not go until Friday.
+    """
+    from django.utils import timezone
+
+    today = today or timezone.localdate()
+    queue = picking_queue(warehouse)
+
+    return {
+        "ready_to_pick": queue.filter(status=OrderStatus.RELEASED).count(),
+        "picked": queue.filter(status=OrderStatus.PICKED).count(),
+        # Picking does not stamp a date of its own, so this reads the ledger
+        # rows picking writes — the only record of when it happened.
+        "completed_today": _picked_today(warehouse, today),
+    }
+
+
+def _picked_today(warehouse, today):
+    from inventory.models import MovementType, StockMovement
+
+    rows = StockMovement.objects.filter(
+        movement_type=MovementType.PICK, occurred_on=today
+    )
+    if warehouse is not None:
+        rows = rows.filter(warehouse=warehouse)
+
+    return rows.values("document_number").distinct().count()
+
+
 def part_processed_orders(warehouse=None, school=None):
     """Orders picked but not yet despatched — F52, and F54.
 
@@ -101,7 +188,9 @@ def part_processed_orders(warehouse=None, school=None):
     """
     queryset = (
         SchoolOrder.objects.filter(status=OrderStatus.PICKED)
-        .filter(shipments__isnull=True)
+        # F42: an order reaches a van through its lines now, so "not yet
+        # despatched" is "no shipment line points at it".
+        .filter(shipment_lines__isnull=True)
         .select_related("school", "school__primary_warehouse", "created_by")
     )
 
@@ -140,7 +229,7 @@ def shipments_costed(date_from=None, date_to=None, school=None, warehouse=None):
     lines = ShipmentLine.objects.select_related("shipment")
     lines = _within(lines, "shipment__shipped_on", date_from, date_to)
     if school is not None:
-        lines = lines.filter(shipment__order__school=school)
+        lines = lines.filter(shipment__school=school)
     if warehouse is not None:
         lines = lines.filter(shipment__from_warehouse=warehouse)
 
@@ -150,14 +239,14 @@ def shipments_costed(date_from=None, date_to=None, school=None, warehouse=None):
     # shipment line by however many order lines matched it.
     charged = Subquery(
         SchoolOrderLine.objects.filter(
-            order=OuterRef("shipment__order"), sku=OuterRef("sku")
+            order=OuterRef("order"), sku=OuterRef("sku")
         ).values("unit_price")[:1],
         output_field=MONEY,
     )
 
     return (
         lines.annotate(unit_price=charged)
-        .values("shipment__order__school_id", "shipment__order__school__name")
+        .values("shipment__school_id", "shipment__school__name")
         .annotate(
             shipments=Count("shipment_id", distinct=True),
             units=Coalesce(Sum("quantity"), Value(0)),
@@ -167,5 +256,5 @@ def shipments_costed(date_from=None, date_to=None, school=None, warehouse=None):
                 output_field=MONEY,
             ),
         )
-        .order_by("shipment__order__school__name")
+        .order_by("shipment__school__name")
     )

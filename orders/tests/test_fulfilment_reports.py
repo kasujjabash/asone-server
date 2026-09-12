@@ -95,11 +95,19 @@ class ThePackingList(ReportSetup):
 
     def test_it_carries_the_invoice_number_and_the_student_together(self):
         """AsOne's definitions page: both are needed to hand the parcel to
-        the right child. Either alone is not enough."""
+        the right child. Either alone is not enough.
+
+        Since F42 the pairing is **per line**, because a consolidated van
+        carries several students — which is exactly when the pairing starts
+        to matter.
+        """
         sheet = packing_list_for(self.shipped(student="Grace Nabirye"))
 
-        self.assertEqual(sheet["student_name"], "Grace Nabirye")
-        self.assertTrue(sheet["invoice_number"].startswith("SO-"))
+        for line in sheet["lines"]:
+            self.assertEqual(line["student_name"], "Grace Nabirye")
+            self.assertTrue(line["invoice_number"].startswith("SO-"))
+
+        self.assertEqual(len(sheet["order_numbers"]), 1)
 
     def test_it_lists_what_is_in_the_parcel(self):
         sheet = packing_list_for(self.shipped())
@@ -132,7 +140,7 @@ class ThePackingList(ReportSetup):
         self.client.force_authenticate(self.julius)
 
         rows = self.client.get(
-            reverse("orders:school-order-packing-lists", args=[shipment.order.pk])
+            reverse("orders:school-order-packing-lists", args=[shipment.orders.first().pk])
         ).data
 
         self.assertEqual(len(rows), 1)
@@ -149,7 +157,7 @@ class ThePackingList(ReportSetup):
 
         self.assertEqual(
             self.client.get(
-                reverse("orders:school-order-packing-lists", args=[shipment.order.pk])
+                reverse("orders:school-order-packing-lists", args=[shipment.orders.first().pk])
             ).status_code,
             status.HTTP_403_FORBIDDEN,
         )

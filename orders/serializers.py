@@ -121,12 +121,29 @@ class ReleaseOrderSerializer(serializers.Serializer):
 
 
 class ShipmentLineSerializer(serializers.ModelSerializer):
+    """One SKU on a van, and whose it is.
+
+    Since F42 a shipment carries several orders, so the line — not the
+    shipment — is what names the student. The packing list is built on this.
+    """
+
     sku_number = serializers.CharField(source="sku.number", read_only=True)
     sku_description = serializers.CharField(source="sku.description", read_only=True)
+    order_number = serializers.CharField(source="order.number", read_only=True)
+    student_name = serializers.CharField(source="order.student_name", read_only=True)
 
     class Meta:
         model = ShipmentLine
-        fields = ("id", "sku", "sku_number", "sku_description", "quantity")
+        fields = (
+            "id",
+            "order",
+            "order_number",
+            "student_name",
+            "sku",
+            "sku_number",
+            "sku_description",
+            "quantity",
+        )
 
 
 class ShipmentSerializer(serializers.ModelSerializer):
@@ -135,25 +152,40 @@ class ShipmentSerializer(serializers.ModelSerializer):
     from_warehouse_name = serializers.CharField(
         source="from_warehouse.name", read_only=True
     )
-    order_number = serializers.CharField(source="order.number", read_only=True)
+    school_name = serializers.CharField(source="school.name", read_only=True)
+    # F42: a van carries several orders, so the list column is a count and
+    # the numbers themselves are a list, not one field.
+    order_count = serializers.IntegerField(read_only=True)
+    order_numbers = serializers.SerializerMethodField()
     shipped_by_name = serializers.CharField(
         source="shipped_by.get_full_name", read_only=True
     )
+    status = serializers.CharField(read_only=True)
+    total_quantity = serializers.IntegerField(read_only=True)
     lines = ShipmentLineSerializer(many=True, read_only=True)
+
+    def get_order_numbers(self, shipment) -> list:
+        """Read off the prefetched lines, so a list costs no extra query."""
+        return sorted({line.order.number for line in shipment.lines.all()})
 
     class Meta:
         model = Shipment
         fields = (
             "id",
             "number",
-            "order",
-            "order_number",
+            "school",
+            "school_name",
+            "order_count",
+            "order_numbers",
+            "status",
+            "total_quantity",
             "from_warehouse",
             "from_warehouse_name",
             "shipped_on",
             "shipped_by",
             "shipped_by_name",
             "waybill_number",
+            "carrier_method",
             "notes",
             "received_at",
             "received_by",
@@ -250,6 +282,7 @@ class SchoolOrderSerializer(serializers.ModelSerializer):
             "order_date",
             "status",
             "status_display",
+            "priority",
             "notes",
             "total",
             "created_by",
@@ -382,6 +415,16 @@ class FillBackorderSerializer(serializers.Serializer):
 
 
 class PackingListLineSerializer(serializers.Serializer):
+    """One item in the parcel, and who it is for.
+
+    AsOne's definitions page: the school uses the **invoice number and the
+    student's name together** to hand shipments to the right child. On a
+    consolidated van (F42) that pairing has to be per line — one sheet
+    covers several students.
+    """
+
+    invoice_number = serializers.CharField()
+    student_name = serializers.CharField()
     sku_number = serializers.CharField()
     description = serializers.CharField()
     quantity = serializers.IntegerField()
@@ -394,10 +437,13 @@ class PackingListSerializer(serializers.Serializer):
     shipped_on = serializers.DateField()
     waybill_number = serializers.CharField()
     from_warehouse = serializers.CharField()
-    invoice_number = serializers.CharField(
-        help_text="The order number. Used with the student's name to hand over the parcel."
+    # F42: a consolidated van carries several invoices, so the pairing of
+    # invoice number and student moved onto the lines — which is where the
+    # school actually reads it when handing parcels over.
+    order_numbers = serializers.ListField(
+        child=serializers.CharField(),
+        help_text="Every invoice number on this van.",
     )
-    student_name = serializers.CharField()
     school = serializers.CharField()
     school_address = serializers.CharField()
     is_direct_from_another_warehouse = serializers.BooleanField(
@@ -411,6 +457,7 @@ class PartProcessedOrderSerializer(serializers.ModelSerializer):
     """An order picked but not yet despatched — F52, F54."""
 
     school_name = serializers.CharField(source="school.name", read_only=True)
+    status_display = serializers.CharField(source="get_status_display", read_only=True)
     warehouse_name = serializers.CharField(
         source="school.primary_warehouse.name", read_only=True
     )
@@ -420,7 +467,7 @@ class PartProcessedOrderSerializer(serializers.ModelSerializer):
         model = SchoolOrder
         fields = (
             "id", "number", "school", "school_name", "warehouse_name",
-            "student_name", "order_date", "status", "total",
+            "student_name", "order_date", "status", "status_display", "total",
         )
         read_only_fields = fields
 
@@ -428,11 +475,122 @@ class PartProcessedOrderSerializer(serializers.ModelSerializer):
 class CostedShipmentSerializer(serializers.Serializer):
     """What went to a school and what it was worth — F57."""
 
-    school_id = serializers.IntegerField(source="shipment__order__school_id")
-    school_name = serializers.CharField(source="shipment__order__school__name")
+    school_id = serializers.IntegerField(source="shipment__school_id")
+    school_name = serializers.CharField(source="shipment__school__name")
     shipments = serializers.IntegerField()
     units = serializers.IntegerField()
     value = serializers.DecimalField(
         max_digits=18, decimal_places=2,
         help_text="Valued at what the school was charged, snapshotted when the order was placed.",
     )
+
+
+class DespatchSerializer(serializers.Serializer):
+    """Sending a school's picked orders out on one van — F42."""
+
+    school = serializers.IntegerField(help_text="Who the van is going to.")
+    orders = serializers.ListField(
+        child=serializers.IntegerField(),
+        required=False,
+        help_text=(
+            "Which orders to load. Omit to send every picked order waiting "
+            "for that school at this warehouse."
+        ),
+    )
+    from_warehouse = serializers.IntegerField(
+        required=False,
+        help_text="Defaults to the caller's own warehouse.",
+    )
+    shipped_on = serializers.DateField(required=False)
+    waybill_number = serializers.CharField(
+        max_length=60, required=False, allow_blank=True
+    )
+    carrier_method = serializers.CharField(
+        max_length=120, required=False, allow_blank=True
+    )
+    notes = serializers.CharField(required=False, allow_blank=True)
+
+
+class ReadyToDespatchSerializer(serializers.Serializer):
+    """A school with orders picked and waiting — the despatch queue."""
+
+    school_id = serializers.IntegerField()
+    school__name = serializers.CharField()
+    orders = serializers.IntegerField(help_text="Picked orders waiting for this school.")
+    units = serializers.IntegerField(help_text="Garments across those orders.")
+
+
+class PickingQueueRowSerializer(serializers.ModelSerializer):
+    """An order waiting to be picked — the backlog row."""
+
+    school_name = serializers.CharField(source="school.name", read_only=True)
+    warehouse_name = serializers.CharField(
+        source="school.primary_warehouse.name", read_only=True
+    )
+    status_display = serializers.CharField(source="get_status_display", read_only=True)
+    priority_display = serializers.CharField(
+        source="get_priority_display", read_only=True
+    )
+    item_count = serializers.SerializerMethodField()
+    sku_sample = serializers.SerializerMethodField()
+
+    class Meta:
+        model = SchoolOrder
+        fields = (
+            "id",
+            "number",
+            "school",
+            "school_name",
+            "warehouse_name",
+            "student_name",
+            "order_date",
+            "status",
+            "status_display",
+            "priority",
+            "priority_display",
+            "item_count",
+            "sku_sample",
+        )
+
+    def get_item_count(self, order) -> int:
+        """Garments, not lines — what the warehouse actually pulls."""
+        return sum(line.quantity for line in order.lines.all())
+
+    def get_sku_sample(self, order) -> list:
+        """The first few SKUs, so a clerk can see what kind of pick it is."""
+        return [line.sku.number for line in order.lines.all()[:3]]
+
+
+class PickingSummarySerializer(serializers.Serializer):
+    """The three tiles above the picking backlog."""
+
+    ready_to_pick = serializers.IntegerField(
+        help_text="Released and paid for, nothing off the shelf yet."
+    )
+    picked = serializers.IntegerField(
+        help_text="Off the shelf and reserved, waiting for a van."
+    )
+    completed_today = serializers.IntegerField(
+        help_text="Orders picked today, counted from the ledger rows picking writes."
+    )
+
+
+class PaginatedPickingQueueSerializer(serializers.Serializer):
+    """The backlog, one page of it, in the shape every other list uses."""
+
+    count = serializers.IntegerField()
+    next = serializers.CharField(allow_null=True)
+    previous = serializers.CharField(allow_null=True)
+    results = PickingQueueRowSerializer(many=True)
+
+
+class PickingQueueSerializer(serializers.Serializer):
+    """The picking screen's landing payload: the tiles and a page of backlog.
+
+    `summary` counts the whole queue while `orders` is one page of it. That
+    asymmetry is on purpose — "12 ready to pick" means twelve, not twelve on
+    this page.
+    """
+
+    summary = PickingSummarySerializer()
+    orders = PaginatedPickingQueueSerializer()
