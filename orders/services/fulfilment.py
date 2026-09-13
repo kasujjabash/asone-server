@@ -160,3 +160,102 @@ def pick_order(order, *, picked_by):
     order.status = OrderStatus.PICKED
     order.save(update_fields=["status"])
     return order
+
+
+class OrderCannotBeUnpicked(Exception):
+    """The order is not in a state where a pick can be taken back."""
+
+
+@transaction.atomic
+def unpick_order(order, *, unpicked_by, reason=""):
+    """Put a mistakenly picked order back on the shelf — the undo for F39.
+
+    **Why this has to exist.** Picking is one click and it reserves stock:
+    the goods stop being free to promise to anybody else. Pick the wrong
+    order and the next school's order can be refused for a shortfall that
+    is not real, and the wrong order joins the despatch queue and goes out
+    on a van. Without a way back, the only correction was an inventory
+    adjustment — a different document, Finance only, that says the stock was
+    counted wrong rather than that somebody clicked the wrong row.
+
+    **The ledger is append-only, so nothing is deleted.** This posts the
+    offsetting pair — out of PICK, back into AVAILABLE — at the value the
+    stock is currently carried at. The original rows stand, and the history
+    reads as what happened: picked, then put back, by whom and when.
+
+    Refused once the order has shipped. At that point the stock has left the
+    building and the ledger is right; what is wrong is the delivery, and
+    that is a return, not an undo.
+    """
+    if order.status == OrderStatus.SHIPPED:
+        raise OrderCannotBeUnpicked(
+            f"{order.number} has already shipped. Stock that has left the "
+            "warehouse comes back as a return, not by undoing the pick."
+        )
+    if order.status == OrderStatus.COMPLETED:
+        raise OrderCannotBeUnpicked(
+            f"{order.number} has been delivered and confirmed."
+        )
+    if order.status != OrderStatus.PICKED:
+        raise OrderCannotBeUnpicked(
+            f"{order.number} is {order.get_status_display().lower()}, so there "
+            "is nothing to put back."
+        )
+
+    from inventory.models import MovementType, StockStatus
+    from inventory.services import average_unit_value, post_movement
+
+    # Imported here rather than at module scope: shipping imports fulfilment
+    # for check_availability, so a top-level import would be circular.
+    from .shipping import picked_stock_for
+
+    warehouse = order.warehouse
+    reserved = picked_stock_for(order, warehouse)
+    if not reserved:
+        raise OrderCannotBeUnpicked(
+            f"Nothing is reserved for {order.number} at {warehouse.name}."
+        )
+
+    from catalog.models import Sku
+
+    skus = Sku.objects.in_bulk(reserved.keys())
+    occurred_on = timezone.now().date()
+
+    for sku_id, quantity in reserved.items():
+        sku = skus[sku_id]
+        # Valued at what it is carried at in PICK, so putting it back neither
+        # creates nor destroys value — the same reasoning picking used.
+        unit_value = average_unit_value(sku, warehouse, stock_status=StockStatus.PICK)
+
+        post_movement(
+            warehouse=warehouse,
+            sku=sku,
+            quantity=-quantity,
+            movement_type=MovementType.PICK,
+            stock_status=StockStatus.PICK,
+            unit_value=unit_value,
+            document_number=order.number,
+            occurred_on=occurred_on,
+            created_by=unpicked_by,
+        )
+        post_movement(
+            warehouse=warehouse,
+            sku=sku,
+            quantity=quantity,
+            movement_type=MovementType.PICK,
+            stock_status=StockStatus.AVAILABLE,
+            unit_value=unit_value,
+            document_number=order.number,
+            occurred_on=occurred_on,
+            created_by=unpicked_by,
+        )
+
+    # Back to where it was before the pick: released and waiting.
+    order.status = OrderStatus.RELEASED
+    if reason:
+        order.notes = f"{order.notes}\nPick undone: {reason}".strip()
+        order.save(update_fields=["status", "notes"])
+    else:
+        order.save(update_fields=["status"])
+
+    return order

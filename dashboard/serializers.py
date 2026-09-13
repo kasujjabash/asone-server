@@ -24,6 +24,9 @@ class DashboardSummarySerializer(serializers.Serializer):
     outstanding_backorders = serializers.IntegerField(
         help_text="Backorders open or assigned, not yet shipped."
     )
+    units_shipped_today = serializers.IntegerField(
+        help_text="Garments that left this warehouse today, across every van."
+    )
     skus_below_minimum = serializers.IntegerField(
         help_text="SKUs at or under their reorder floor."
     )

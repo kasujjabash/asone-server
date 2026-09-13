@@ -87,9 +87,31 @@ def orders_awaiting_dispatch(warehouse=None):
     """
     return (
         _orders_for(warehouse)
-        .filter(status=OrderStatus.PICKED, shipments__isnull=True)
+        # F42: an order reaches a van through its lines now, so "not yet
+        # despatched" is "no shipment line points at it".
+        .filter(status=OrderStatus.PICKED, shipment_lines__isnull=True)
         .count()
     )
+
+
+def units_shipped_today(warehouse=None):
+    """Garments that left the building today.
+
+    Counted from the shipment lines rather than the ledger: a van is the
+    document, and "what went out today" is a question about vans. Summed
+    over lines so a consolidated despatch carrying four orders counts its
+    garments once each, not its orders.
+    """
+    from django.db.models import Sum
+    from django.utils import timezone
+
+    from orders.models import ShipmentLine
+
+    lines = ShipmentLine.objects.filter(shipment__shipped_on=timezone.localdate())
+    if warehouse is not None:
+        lines = lines.filter(shipment__from_warehouse=warehouse)
+
+    return lines.aggregate(total=Sum("quantity"))["total"] or 0
 
 
 def outstanding_backorders(warehouse=None):
@@ -123,6 +145,7 @@ def summary(warehouse=None):
         "orders_awaiting_dispatch": orders_awaiting_dispatch(warehouse),
         "outstanding_backorders": outstanding_backorders(warehouse),
         "skus_below_minimum": skus_below_minimum(warehouse),
+        "units_shipped_today": units_shipped_today(warehouse),
     }
 
 
@@ -242,6 +265,34 @@ def needs_attention(warehouse=None):
             }
         )
 
+    # Parcels that left and nobody ever said arrived.
+    #
+    # **This is the alert the Shipped/Completed split exists for.** Keeping
+    # the two apart makes a lost delivery visible — but only if somebody who
+    # can chase it is told. Without this the gap was recorded and shown to
+    # nobody: the school sees its own parcels, and the school is not who
+    # rings the warehouse.
+    #
+    # Fourteen days, because everything shipped this morning is unconfirmed
+    # and none of it is a problem yet.
+    from orders.services.shipping import shipments_awaiting_confirmation
+
+    stale = len(
+        list(shipments_awaiting_confirmation(warehouse=warehouse, older_than_days=14))
+    )
+    if stale:
+        alerts.append(
+            {
+                "kind": "deliveries_unconfirmed",
+                "level": CRITICAL,
+                "count": stale,
+                "message": (
+                    f"{stale} deliver{'y' if stale == 1 else 'ies'} shipped over "
+                    "14 days ago and never confirmed"
+                ),
+            }
+        )
+
     return alerts
 
 
@@ -296,7 +347,7 @@ def recent_activity(warehouse=None, limit=10):
         )
 
     shipments = Shipment.objects.filter(shipped_on__gte=since).select_related(
-        "order", "order__school"
+        "school"
     )
     if warehouse is not None:
         shipments = shipments.filter(from_warehouse=warehouse)
@@ -305,10 +356,9 @@ def recent_activity(warehouse=None, limit=10):
             {
                 "at": shipment.created_at,
                 "kind": "shipment",
-                "reference": shipment.order.number,
+                "reference": shipment.number,
                 "description": (
-                    f"Order {shipment.order.number} shipped to "
-                    f"{shipment.order.school.name}"
+                    f"{shipment.number} shipped to {shipment.school.name}"
                 ),
             }
         )
@@ -814,9 +864,9 @@ def school_deliveries_to_confirm(school):
     today = timezone.localdate()
 
     shipments = (
-        Shipment.objects.filter(order__school=school, received_at__isnull=True)
-        .exclude(order__status=OrderStatus.CANCELLED)
-        .select_related("order", "from_warehouse")
+        Shipment.objects.filter(school=school, received_at__isnull=True)
+        .select_related("from_warehouse")
+        .prefetch_related("lines__order")
         .order_by("shipped_on")
     )
 
@@ -824,9 +874,15 @@ def school_deliveries_to_confirm(school):
         {
             "id": shipment.id,
             "number": shipment.number,
-            "order_id": shipment.order_id,
-            "order_number": shipment.order.number,
-            "student_name": shipment.order.student_name,
+            # F42: a van can carry several orders, so the row names the
+            # shipment and lists what is on it rather than pretending to one.
+            "order_id": next((line.order_id for line in shipment.lines.all()), None),
+            "order_number": ", ".join(
+                sorted({line.order.number for line in shipment.lines.all()})
+            ),
+            "student_name": ", ".join(
+                sorted({line.order.student_name for line in shipment.lines.all()})
+            ),
             "shipped_on": shipment.shipped_on,
             "days_in_transit": (today - shipment.shipped_on).days,
             # Usually the school's own warehouse — but a backorder may be

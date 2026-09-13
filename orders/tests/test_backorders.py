@@ -247,7 +247,10 @@ class FillingItShipsDirect(BackorderSetup):
         shipment = fill_backorder(backorder, filled_by=self.joan)
 
         self.assertEqual(shipment.from_warehouse, self.serere)
-        self.assertEqual(shipment.order, backorder.order)
+        # F42: the order is on the line now, not the shipment — a van can
+        # carry several. A direct backorder fill is a one-order van.
+        self.assertEqual(shipment.school, backorder.order.school)
+        self.assertEqual(list(shipment.orders), [backorder.order])
         self.assertEqual(shipment.lines.get().quantity, 2)
 
     def test_the_stock_never_touches_the_schools_own_warehouse(self):

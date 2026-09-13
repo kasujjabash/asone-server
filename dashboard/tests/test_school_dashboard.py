@@ -279,3 +279,52 @@ class TheEndpointReturnsWhatTheScreenDraws(SchoolDashboardSetup):
         self.assertEqual(len(body["deliveries_to_confirm"]), 1)
         self.assertIn("backorders", body)
         self.assertIn("amount_outstanding", body)
+
+
+class TheLeadHearsAboutALostParcel(SchoolDashboardSetup):
+    """The alert the Shipped/Completed split exists for.
+
+    Keeping the two apart makes a lost delivery visible — but only if
+    somebody who can chase it is told. The school sees its own parcels, and
+    the school is not who rings the warehouse.
+    """
+
+    def attention(self):
+        from dashboard.services import needs_attention
+
+        return {alert["kind"]: alert for alert in needs_attention()}
+
+    def test_a_parcel_out_for_a_month_reaches_the_lead(self):
+        from datetime import timedelta
+        from django.utils import timezone
+
+        order = self.shipped_order()
+        shipment = order.shipments.get()
+        shipment.shipped_on = timezone.localdate() - timedelta(days=30)
+        shipment.save(update_fields=["shipped_on"])
+
+        alert = self.attention().get("deliveries_unconfirmed")
+
+        self.assertIsNotNone(alert)
+        self.assertEqual(alert["count"], 1)
+        self.assertIn("delivery", alert["message"])
+
+    def test_a_parcel_that_left_this_morning_is_not_an_alert_yet(self):
+        """Everything shipped today is unconfirmed and none of it is a
+        problem."""
+        self.shipped_order()
+
+        self.assertNotIn("deliveries_unconfirmed", self.attention())
+
+    def test_a_confirmed_parcel_stops_being_chased(self):
+        from datetime import timedelta
+        from django.utils import timezone
+
+        order = self.shipped_order()
+        shipment = order.shipments.get()
+        shipment.shipped_on = timezone.localdate() - timedelta(days=30)
+        shipment.save(update_fields=["shipped_on"])
+
+        confirm_receipt(shipment, confirmed_by=self.clerk)
+
+        self.assertNotIn("deliveries_unconfirmed", self.attention())

@@ -40,8 +40,19 @@ class Shipment(models.Model):
         help_text="System assigned. Never reused.",
     )
 
-    order = models.ForeignKey(
-        "orders.SchoolOrder", on_delete=models.PROTECT, related_name="shipments"
+    # F42: **one despatch, many orders.** AsOne's checklist asks for a
+    # "consolidated weekly despatch" per school, and the school then hands
+    # parcels to students by name off the packing list. So the consignee is
+    # the school, and which orders are on the van is a fact about the lines.
+    #
+    # This replaced a single `order` FK. A shipment carrying one order is
+    # still the common case — `ship_order()` makes exactly that — but it is
+    # now a special case of the general shape rather than the only shape.
+    school = models.ForeignKey(
+        "catalog.School",
+        on_delete=models.PROTECT,
+        related_name="shipments",
+        help_text="Who receives it. Every order on a shipment belongs to this school.",
     )
 
     # Never derived from the school's primary warehouse — see D2 in the
@@ -54,6 +65,16 @@ class Shipment(models.Model):
     )
 
     shipped_on = models.DateField(help_text="The day it left the warehouse.")
+
+    # How it travelled — "Internal Route Truck #4". Free text and optional,
+    # for the same reason the packing list number is: it is written on a
+    # sheet of paper at the gate, and a clerk who was not told must still be
+    # able to record the despatch.
+    carrier_method = models.CharField(
+        max_length=120,
+        blank=True,
+        help_text="How it travelled — a truck, a route, a courier. As given at the gate.",
+    )
     shipped_by = models.ForeignKey(
         "accounts.User", on_delete=models.PROTECT, related_name="+"
     )
@@ -88,8 +109,13 @@ class Shipment(models.Model):
     class Meta:
         ordering = ["-shipped_on", "-number"]
         indexes = [
-            models.Index(fields=["order"]),
+            # "What is coming to this school" and "what left this warehouse
+            # this week" — the two questions the shipping screens ask.
+            models.Index(fields=["school", "-shipped_on"]),
             models.Index(fields=["from_warehouse", "shipped_on"]),
+            # Parcels nobody has confirmed: the school dashboard's actionable
+            # list, and the gap F42's completion rule turns on.
+            models.Index(fields=["received_at"]),
         ]
 
     def __str__(self):
@@ -100,7 +126,47 @@ class Shipment(models.Model):
         return self.received_at is not None
 
     @property
+    def orders(self):
+        """The distinct orders on this van, in number order.
+
+        Derived from the lines rather than stored: a shipment *is* its lines,
+        and a second list of orders could disagree with them.
+        """
+        from orders.models.school_orders import SchoolOrder
+
+        return (
+            SchoolOrder.objects.filter(shipment_lines__shipment=self)
+            .distinct()
+            .order_by("number")
+        )
+
+    @property
+    def order_count(self) -> int:
+        """How many orders are on it — the design's "Orders" column.
+
+        Counted over prefetched lines so a list does not fan out per row.
+        """
+        return len({line.order_id for line in self.lines.all()})
+
+    @property
+    def status(self) -> str:
+        """Where this parcel is — derived, never stored.
+
+        Two stored facts answer it, which is why there is no status column:
+        `shipped_on` says it left, `received_at` says it arrived. A third
+        state would be a third thing to keep in step with them.
+
+        Deliberately **not** the design's "Preparing"/"Ready" pair. Those
+        describe how far a warehouse has got with picking, which is a fact
+        about the *order*, not about a parcel that does not exist until
+        `ship_order()` creates it. A shipment row is only ever created at
+        despatch, so it is never "preparing".
+        """
+        return "DELIVERED" if self.received_at else "SHIPPED"
+
+    @property
     def total_quantity(self) -> int:
+        """Units on the van. Summed over prefetched lines, like an order."""
         return sum(line.quantity for line in self.lines.all())
 
     def save(self, *args, **kwargs):
@@ -112,25 +178,41 @@ class Shipment(models.Model):
 
 
 class ShipmentLine(models.Model):
-    """One SKU on a shipment.
+    """One SKU on a shipment, for one order.
 
     Lines exist because a shipment is not always the whole order: a short
     pick leaves a backorder, and what is on the van is only what was there.
+
+    **`order` is what makes F42 work.** A consolidated despatch carries
+    several students' uniforms, and the packing list has to say which parcel
+    is whose — AsOne's note is that the school "distributes to students by
+    name on the packing list". Without the order on the line, a van holding
+    four shirts could not say which two are Grace's.
     """
 
     shipment = models.ForeignKey(
         Shipment, on_delete=models.CASCADE, related_name="lines"
     )
+    order = models.ForeignKey(
+        "orders.SchoolOrder",
+        on_delete=models.PROTECT,
+        related_name="shipment_lines",
+        help_text="Which order this line fills, and so which student it is for.",
+    )
     sku = models.ForeignKey("catalog.Sku", on_delete=models.PROTECT, related_name="+")
     quantity = models.PositiveIntegerField(validators=[MinValueValidator(1)])
 
     class Meta:
-        ordering = ["sku__description"]
+        ordering = ["order__number", "sku__description"]
         constraints = [
+            # Per *order*, not per shipment: two students on the same van
+            # both getting a size 8 shirt is two lines of the same SKU, and
+            # collapsing them would lose whose is whose.
             models.UniqueConstraint(
-                fields=["shipment", "sku"], name="unique_sku_per_shipment"
+                fields=["shipment", "order", "sku"],
+                name="unique_sku_per_order_per_shipment",
             ),
         ]
 
     def __str__(self):
-        return f"{self.quantity} x {self.sku.number}"
+        return f"{self.quantity} x {self.sku.number} for {self.order.number}"

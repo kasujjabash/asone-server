@@ -15,6 +15,15 @@ class TailoringCenter(models.Model):
     name = models.CharField(max_length=120)
     address = models.TextField(blank=True)
 
+    # Sites are deactivated, never deleted — the same rule accounts follow.
+    # Every transaction that happened here points at this row, so PROTECT
+    # refuses the delete; a closed site has to be able to say it is closed
+    # while its history stays readable.
+    is_active = models.BooleanField(
+        default=True,
+        help_text="A closed site stays in reports but takes no new work.",
+    )
+
     class Meta:
         ordering = ["name"]
         constraints = [
@@ -37,6 +46,15 @@ class Warehouse(models.Model):
 
     name = models.CharField(max_length=120)
     address = models.TextField(blank=True)
+
+    # Sites are deactivated, never deleted — the same rule accounts follow.
+    # Every transaction that happened here points at this row, so `PROTECT`
+    # refuses the delete and a closed site has to be able to say it is closed
+    # while its history stays readable.
+    is_active = models.BooleanField(
+        default=True,
+        help_text="A closed site stays in reports but takes no new work.",
+    )
 
     # "Warehouses have a primary TC but can order on any TC" (p.4), so this is
     # a default for production orders, not a restriction. Nullable because a
@@ -80,6 +98,15 @@ class School(models.Model):
     name = models.CharField(max_length=120)
     level = models.CharField(max_length=2, choices=Level.choices)
     address = models.TextField(blank=True)
+
+    # Sites are deactivated, never deleted — the same rule accounts follow.
+    # Every transaction that happened here points at this row, so PROTECT
+    # refuses the delete; a closed site has to be able to say it is closed
+    # while its history stays readable.
+    is_active = models.BooleanField(
+        default=True,
+        help_text="A closed site stays in reports but takes no new work.",
+    )
 
     # A school orders from this warehouse and no other. A backorder may still
     # be *filled* by a different warehouse shipping direct to the school; see

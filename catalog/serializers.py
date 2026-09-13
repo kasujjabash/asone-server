@@ -50,7 +50,7 @@ class TailoringCenterSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = TailoringCenter
-        fields = ("id", "name", "address")
+        fields = ("id", "name", "address", "is_active")
 
 
 class WarehouseSerializer(serializers.ModelSerializer):
@@ -70,6 +70,7 @@ class WarehouseSerializer(serializers.ModelSerializer):
             "address",
             "primary_tailoring_center",
             "primary_tailoring_center_name",
+            "is_active",
         )
 
 
@@ -83,6 +84,10 @@ class SchoolSerializer(serializers.ModelSerializer):
         source="primary_warehouse.name", read_only=True
     )
 
+    # How much this school currently has in flight. Annotated by the
+    # viewset, not counted per row — see SchoolViewSet.get_queryset.
+    active_orders_count = serializers.IntegerField(read_only=True, default=0)
+
     class Meta:
         model = School
         fields = (
@@ -93,6 +98,8 @@ class SchoolSerializer(serializers.ModelSerializer):
             "address",
             "primary_warehouse",
             "primary_warehouse_name",
+            "is_active",
+            "active_orders_count",
         )
 
 

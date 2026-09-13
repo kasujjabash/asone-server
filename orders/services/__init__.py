@@ -18,6 +18,8 @@ from .fulfilment import (
     OrderNotFillable,
     check_availability,
     pick_order,
+    unpick_order,
+    OrderCannotBeUnpicked,
 )
 from .backorders import (
     CannotAssign,
@@ -40,6 +42,9 @@ from .shipping import (
     ship_order,
     shipments_awaiting_confirmation,
     confirm_receipt,
+    despatch_to_school,
+    orders_ready_to_despatch,
+    NothingReadyToDespatch,
 )
 from .pos import (
     CannotCancel,
@@ -78,6 +83,8 @@ __all__ = [
     "order_demand",
     "orders_on_hold",
     "pick_order",
+    "unpick_order",
+    "OrderCannotBeUnpicked",
     "assign_backorder",
     "assigned_to",
     "fill_backorder",
@@ -90,6 +97,9 @@ __all__ = [
     "place_order",
     "release_order",
     "confirm_receipt",
+    "despatch_to_school",
+    "orders_ready_to_despatch",
+    "NothingReadyToDespatch",
     "ship_order",
     "shipments_awaiting_confirmation",
 ]

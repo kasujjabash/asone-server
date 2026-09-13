@@ -161,6 +161,7 @@ class TailoringCenterViewSet(viewsets.ModelViewSet):
     serializer_class = TailoringCenterSerializer
     permission_classes = MASTER_DATA
     read_roles = (Role.WAREHOUSE_STAFF,)
+    filterset_fields = ("is_active",)
     search_fields = ("name",)
 
 
@@ -172,7 +173,7 @@ class WarehouseViewSet(viewsets.ModelViewSet):
     serializer_class = WarehouseSerializer
     permission_classes = MASTER_DATA
     read_roles = (Role.WAREHOUSE_STAFF,)
-    filterset_fields = ("primary_tailoring_center",)
+    filterset_fields = ("primary_tailoring_center", "is_active")
 
 
 @extend_schema(tags=["Master data — sites"])
@@ -183,7 +184,38 @@ class SchoolViewSet(viewsets.ModelViewSet):
     serializer_class = SchoolSerializer
     permission_classes = MASTER_DATA
     read_roles = (Role.WAREHOUSE_STAFF, Role.SCHOOL_STAFF)
-    filterset_fields = ("level", "primary_warehouse")
+    filterset_fields = ("level", "primary_warehouse", "is_active")
+
+    def get_queryset(self):
+        """Schools, each with what it currently has in flight.
+
+        Annotated rather than counted per row: a list of forty schools
+        should be one query, not forty-one.
+
+        "Active" is an order the school is still waiting on. Completed and
+        cancelled orders are history, and a school with only those is not
+        busy.
+        """
+        from django.db.models import Count, Q
+
+        from orders.models.school_orders import OrderStatus
+
+        return (
+            super()
+            .get_queryset()
+            .annotate(
+                active_orders_count=Count(
+                    "orders",
+                    filter=~Q(
+                        orders__status__in=(
+                            OrderStatus.COMPLETED,
+                            OrderStatus.CANCELLED,
+                        )
+                    ),
+                    distinct=True,
+                )
+            )
+        )
 
 
 # ---------------------------------------------------------------------------
