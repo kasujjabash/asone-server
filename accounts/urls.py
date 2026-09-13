@@ -12,6 +12,9 @@ app_name = "accounts"
 router = DefaultRouter()
 router.register("users", views.UserViewSet, basename="user")
 router.register("login-attempts", views.LoginAttemptViewSet, basename="login-attempt")
+router.register(
+    "registration-requests", views.RegistrationRequestViewSet, basename="registration-request"
+)
 
 urlpatterns = [
     # Tokens
@@ -27,6 +30,18 @@ urlpatterns = [
         "verify-email/",
         views.EmailVerificationView.as_view(),
         name="verify-email",
+    ),
+    # Open the same way: asking for an account is not something you need one
+    # to do. See RegistrationRequestViewSet for the lead-only review side.
+    path(
+        "register/",
+        views.RegistrationRequestCreateView.as_view(),
+        name="register",
+    ),
+    path(
+        "register/verify/",
+        views.VerifyRegistrationView.as_view(),
+        name="register-verify",
     ),
     path("refresh/", views.RefreshView.as_view(), name="refresh"),
     path("verify/", views.VerifyView.as_view(), name="verify"),

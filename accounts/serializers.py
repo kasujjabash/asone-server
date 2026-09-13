@@ -12,7 +12,7 @@ from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
 from catalog.models import School, Warehouse
 
-from .models import LoginAttempt, User
+from .models import LoginAttempt, RegistrationRequest, User
 from .services import access_summary
 
 
@@ -63,6 +63,7 @@ class UserSerializer(serializers.ModelSerializer):
             "email",
             "first_name",
             "last_name",
+            "phone_number",
             "role",
             "role_display",
             "warehouse",
@@ -100,7 +101,7 @@ class MeUpdateSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = User
-        fields = ("first_name", "last_name", "email")
+        fields = ("first_name", "last_name", "email", "phone_number")
 
     def validate_email(self, value):
         """Reject an address already in use.
@@ -169,6 +170,15 @@ class VerifyLoginCodeSerializer(serializers.Serializer):
 
 class EmailVerificationSerializer(serializers.Serializer):
     """Confirming a new account's address with the emailed code."""
+
+    email = serializers.EmailField()
+    code = serializers.CharField(max_length=12, trim_whitespace=True)
+
+
+class VerifyRegistrationSerializer(serializers.Serializer):
+    """Confirming a registration request's address with the emailed code —
+    POST /api/auth/register/verify/. Same shape as EmailVerificationSerializer;
+    kept separate because it confirms a different kind of row."""
 
     email = serializers.EmailField()
     code = serializers.CharField(max_length=12, trim_whitespace=True)
@@ -247,6 +257,7 @@ class UserAdminSerializer(serializers.ModelSerializer):
             "email",
             "first_name",
             "last_name",
+            "phone_number",
             "role",
             "role_display",
             "warehouse",
@@ -331,6 +342,7 @@ class UserCreateSerializer(UserAdminSerializer):
             "first_name",
             "last_name",
             "email",
+            "phone_number",
             "role",
             "warehouse",
             "school",
@@ -425,3 +437,94 @@ class RoleSerializer(serializers.Serializer):
         child=serializers.BooleanField(),
         help_text="The seven columns of AsOne's access matrix.",
     )
+
+
+# ---------------------------------------------------------------------------
+# Self-registration
+# ---------------------------------------------------------------------------
+
+
+class RegistrationRequestCreateSerializer(serializers.ModelSerializer):
+    """POST /api/auth/register/ — open to anyone.
+
+    No `role`, no `password`, no site. Those are a lead's decision at
+    approval, not the registrant's to make — see RegistrationRequest.
+    """
+
+    class Meta:
+        model = RegistrationRequest
+        fields = ("id", "first_name", "last_name", "email", "phone_number")
+        read_only_fields = ("id",)
+        extra_kwargs = {
+            "first_name": {"required": True, "allow_blank": False},
+            "last_name": {"required": True, "allow_blank": False},
+            "email": {"required": True},
+        }
+
+
+class RegistrationRequestSerializer(serializers.ModelSerializer):
+    """A request as a lead sees it in the review list. Read-only — a lead
+    acts on one through `approve`/`decline`, never by PATCHing this."""
+
+    status_display = serializers.CharField(source="get_status_display", read_only=True)
+    decided_by_name = serializers.CharField(
+        source="decided_by.get_full_name", read_only=True, default=None
+    )
+    created_user_id = serializers.IntegerField(source="created_user.id", read_only=True, default=None)
+    is_email_verified = serializers.BooleanField(read_only=True)
+
+    class Meta:
+        model = RegistrationRequest
+        fields = (
+            "id",
+            "first_name",
+            "last_name",
+            "email",
+            "phone_number",
+            "status",
+            "status_display",
+            "created_at",
+            "verified_at",
+            "is_email_verified",
+            "decided_at",
+            "decided_by_name",
+            "created_user_id",
+            "decision_notes",
+        )
+        read_only_fields = fields
+
+
+class ApproveRegistrationSerializer(serializers.Serializer):
+    """POST /api/auth/registration-requests/{id}/approve/.
+
+    Exactly the part of account creation a registrant could not supply
+    themselves: the role, and the site that role requires.
+    """
+
+    role = serializers.ChoiceField(choices=User.Role.choices)
+    warehouse = serializers.PrimaryKeyRelatedField(
+        queryset=Warehouse.objects.all(), required=False, allow_null=True
+    )
+    school = serializers.PrimaryKeyRelatedField(
+        queryset=School.objects.all(), required=False, allow_null=True
+    )
+
+    def validate(self, attrs):
+        """Same role/site invariant User.clean() enforces, checked here
+        before a real account is created rather than after."""
+        candidate = User(
+            role=attrs["role"],
+            warehouse=attrs.get("warehouse"),
+            school=attrs.get("school"),
+        )
+        try:
+            candidate.clean()
+        except DjangoValidationError as exc:
+            raise serializers.ValidationError(exc.message_dict) from exc
+        return attrs
+
+
+class DeclineRegistrationSerializer(serializers.Serializer):
+    """POST /api/auth/registration-requests/{id}/decline/."""
+
+    notes = serializers.CharField(required=False, allow_blank=True, default="")
