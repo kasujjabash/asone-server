@@ -183,6 +183,215 @@ def create_staff_user(*, password=None, must_change_password=True, **fields):
     return user, password
 
 
+# ---------------------------------------------------------------------------
+# Self-registration: a request, not an account
+# ---------------------------------------------------------------------------
+# A registrant supplies name, email and phone — never a role, which is a
+# lead's decision alone. Nothing here creates a `User`; that only happens on
+# approval, at which point this reduces to `create_staff_user` plus the
+# email it already sends.
+
+
+class RegistrationAlreadyDecided(Exception):
+    """Raised when approving or declining a request that is not PENDING."""
+
+
+class RegistrationEmailNotVerified(Exception):
+    """Raised when approving a request whose address is unconfirmed."""
+
+
+REGISTRATION_STALE_CODE = (
+    "That code is no longer valid. Submit the registration form again to "
+    "get a new one."
+)
+
+
+@transaction.atomic
+def request_registration(*, first_name, last_name, email, phone_number="", http_request=None):
+    """Record a request for an account, and immediately email a code
+    proving the address belongs to whoever is asking. Open to anyone —
+    there is no user yet to authenticate as.
+
+    Does not check whether the address already belongs to a `User` or an
+    earlier request: that is a lead's call to make when reviewing the list,
+    not a reason to refuse the request outright (an old, unconfirmed
+    address should not block someone from asking again).
+    """
+    from .models import RegistrationRequest
+
+    registration = RegistrationRequest(
+        first_name=first_name,
+        last_name=last_name,
+        email=email,
+        phone_number=phone_number,
+    )
+    registration.full_clean()
+    registration.save()
+
+    send_registration_verification(registration, request=http_request)
+
+    return registration
+
+
+def send_registration_verification(registration, *, request=None):
+    """Email a code proving this address belongs to whoever is registering.
+
+    Mirrors `send_email_verification`: any earlier unused code for this
+    request is retired first, so re-sending never leaves two working codes.
+    """
+    from .models import RegistrationVerification
+
+    RegistrationVerification.objects.filter(
+        registration=registration, consumed_at__isnull=True
+    ).update(consumed_at=timezone.now())
+
+    code = _new_code()
+    verification = RegistrationVerification.objects.create(
+        registration=registration,
+        code_hash=make_password(code),
+        expires_at=timezone.now() + timedelta(days=settings.INVITATION_TTL_DAYS),
+        ip_address=_client_ip(request) if request else None,
+    )
+
+    send_registration_verification_email(registration, code)
+    return verification
+
+
+def send_registration_verification_email(registration, code):
+    """Tell somebody who just asked for an account how to confirm the
+    address they asked with.
+
+    Failures are not swallowed — the caller must know the request was
+    created but nobody was told, the same reasoning `send_verification_email`
+    already documents.
+    """
+    days = settings.INVITATION_TTL_DAYS
+    send_mail(
+        subject="Confirm your AsOne Logistics account request",
+        message=(
+            f"Hello {registration.first_name},\n\n"
+            "Thank you for asking for an AsOne Logistics account.\n\n"
+            f"Your confirmation code is {code}\n\n"
+            "Enter it on the registration page to confirm this address. "
+            "Once confirmed, AsOne's team will review your request and "
+            "assign you a role — you will hear from them by email.\n\n"
+            f"The code expires in {days} days. If it runs out, submit the "
+            "registration form again to get a new one.\n\n"
+            "If you were not expecting this, you can ignore it — no account "
+            "exists until this code is entered and a lead approves your "
+            "request.\n"
+        ),
+        from_email=settings.DEFAULT_FROM_EMAIL,
+        recipient_list=[registration.email],
+        fail_silently=False,
+    )
+
+
+def verify_registration_email(email, code):
+    """Confirm a registrant's address. Returns the request.
+
+    Mirrors `verify_email`: the refusal is raised after the transaction
+    commits, for the same reason documented there — a failed attempt must
+    survive being refused, not be rolled back along with it.
+    """
+    from .models import RegistrationRequest, RegistrationVerification
+
+    refusal = None
+    registration = None
+
+    with transaction.atomic():
+        verification = (
+            RegistrationVerification.objects.select_for_update()
+            .select_related("registration")
+            .filter(registration__email__iexact=(email or "").strip())
+            .order_by("-created_at")
+            .first()
+        )
+
+        if verification is None or not verification.is_usable:
+            refusal = REGISTRATION_STALE_CODE
+        elif verification.registration.status != RegistrationRequest.Status.PENDING:
+            # Already decided one way or the other — nothing left to prove.
+            refusal = REGISTRATION_STALE_CODE
+        elif not check_password(code, verification.code_hash):
+            verification.attempts += 1
+            verification.save(update_fields=["attempts"])
+            remaining = settings.LOGIN_CODE_MAX_ATTEMPTS - verification.attempts
+            refusal = (
+                REGISTRATION_STALE_CODE
+                if remaining <= 0
+                else f"That code is not correct. {remaining} "
+                f"{'try' if remaining == 1 else 'tries'} left."
+            )
+        else:
+            verification.consumed_at = timezone.now()
+            verification.save(update_fields=["consumed_at"])
+            registration = verification.registration
+            registration.verified_at = timezone.now()
+            registration.save(update_fields=["verified_at"])
+
+    if refusal:
+        raise VerificationUnusable(refusal)
+
+    return registration
+
+
+@transaction.atomic
+def approve_registration(request, *, role, warehouse=None, school=None, decided_by, http_request=None):
+    """Turn a pending, email-verified request into a real account.
+
+    Everything below the verification check **is** `create_staff_user` plus
+    the confirmation email — approval does not invent a second way to
+    create an account, it is the moment a lead supplies the one thing a
+    registrant never could: the role.
+    """
+    if request.status != request.Status.PENDING:
+        raise RegistrationAlreadyDecided(
+            f"This request was already {request.status.lower()} and cannot be decided again."
+        )
+
+    if not request.is_email_verified:
+        raise RegistrationEmailNotVerified(
+            "This address has not been confirmed yet — the registrant must "
+            "enter the code emailed to them before this can be approved."
+        )
+
+    user, password = create_staff_user(
+        first_name=request.first_name,
+        last_name=request.last_name,
+        email=request.email,
+        phone_number=request.phone_number,
+        role=role,
+        warehouse=warehouse,
+        school=school,
+    )
+    send_email_verification(user, sent_by=decided_by, request=http_request)
+
+    request.status = request.Status.APPROVED
+    request.decided_at = timezone.now()
+    request.decided_by = decided_by
+    request.created_user = user
+    request.save(update_fields=["status", "decided_at", "decided_by", "created_user"])
+
+    return user, password
+
+
+def decline_registration(request, *, decided_by, notes=""):
+    """Refuse a request. The registrant may submit a fresh one — declining
+    does not block the address, it just answers this particular ask."""
+    if request.status != request.Status.PENDING:
+        raise RegistrationAlreadyDecided(
+            f"This request was already {request.status.lower()} and cannot be decided again."
+        )
+
+    request.status = request.Status.DECLINED
+    request.decided_at = timezone.now()
+    request.decided_by = decided_by
+    request.decision_notes = notes
+    request.save(update_fields=["status", "decided_at", "decided_by", "decision_notes"])
+    return request
+
+
 @transaction.atomic
 def set_user_password(user, *, new_password=None, must_change_password=True) -> str:
     """Set another person's password and sign that account out everywhere.

@@ -28,6 +28,11 @@ class User(AbstractUser):
         help_text="Used to sign in. Must be unique across all staff.",
     )
 
+    #: Collected on both the lead-created flow and self-registration.
+    #: Contact information only — nothing signs in with this and nothing
+    #: checks it for uniqueness.
+    phone_number = models.CharField(max_length=32, blank=True)
+
     USERNAME_FIELD = "email"
 
     # What `createsuperuser` prompts for in addition to email and password.
@@ -305,3 +310,93 @@ class EmailVerification(OneTimeCode):
 
     def __str__(self):
         return f"Email verification for {self.user.email}"
+
+
+class RegistrationRequest(models.Model):
+    """Someone asking for an account, before a lead has looked at it.
+
+    Self-registration does not create a `User` — AsOne provisions staff
+    deliberately, and every stock movement and order records who performed
+    it, so an account nobody vouched for is not something this system wants
+    lying around. This is the front door instead: open to anyone, and it
+    produces nothing more than a request a lead can approve or decline.
+
+    No `role` field. Choosing a role is a lead's decision, made at approval
+    — never the registrant's, and never available before then.
+
+    Kept permanently, approved or declined alike, the same way `User`
+    accounts are deactivated rather than deleted: the record of who asked,
+    and who decided, is worth keeping.
+    """
+
+    class Status(models.TextChoices):
+        PENDING = "PENDING", "Pending"
+        APPROVED = "APPROVED", "Approved"
+        DECLINED = "DECLINED", "Declined"
+
+    first_name = models.CharField(max_length=150)
+    last_name = models.CharField(max_length=150)
+    email = models.EmailField()
+    phone_number = models.CharField(max_length=32, blank=True)
+
+    status = models.CharField(
+        max_length=16, choices=Status.choices, default=Status.PENDING
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    #: Set the moment the registrant enters the code emailed to them at
+    #: submission. Null means unproven — a lead cannot approve a request
+    #: whose address nobody has confirmed holding.
+    verified_at = models.DateTimeField(null=True, blank=True)
+
+    #: Set together with `status` moving off PENDING. Null while pending.
+    decided_at = models.DateTimeField(null=True, blank=True)
+    decided_by = models.ForeignKey(
+        User, null=True, blank=True, on_delete=models.PROTECT, related_name="+"
+    )
+
+    #: Set only on approval — the account this request became. Null for a
+    #: pending or declined request, since neither has one.
+    created_user = models.ForeignKey(
+        User, null=True, blank=True, on_delete=models.PROTECT, related_name="+"
+    )
+
+    #: Why a request was declined, or any note a lead leaves on approval.
+    #: Shown to nobody automatically today — see the open question on
+    #: whether a decline should be emailed to the registrant.
+    decision_notes = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["status", "-created_at"])]
+
+    @property
+    def is_email_verified(self) -> bool:
+        return self.verified_at is not None
+
+    def __str__(self):
+        return f"{self.first_name} {self.last_name} <{self.email}> ({self.status})"
+
+
+class RegistrationVerification(OneTimeCode):
+    """The code proving a registrant holds the mailbox they asked with.
+
+    Sent the moment the request is submitted — before any lead has seen
+    it — so the person confirms their address right after asking, the same
+    beat as `EmailVerification` for a lead-created account. Once spent, the
+    request is unlocked for a lead to review; it stays PENDING either way,
+    since verifying an address is not the same as being approved.
+    """
+
+    registration = models.ForeignKey(
+        RegistrationRequest, on_delete=models.CASCADE, related_name="verifications"
+    )
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["registration", "consumed_at"])]
+        verbose_name = "registration verification code"
+
+    def __str__(self):
+        return f"Registration verification for {self.registration.email}"

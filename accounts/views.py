@@ -26,10 +26,12 @@ from rest_framework_simplejwt.views import (
 )
 
 from . import services
-from .models import LoginAttempt, User
+from .models import LoginAttempt, RegistrationRequest, User
 from .permissions import AUTHENTICATED, CanUpdateTables
 from .throttling import LoginBurstRateThrottle, LoginRateThrottle
 from .serializers import (
+    ApproveRegistrationSerializer,
+    DeclineRegistrationSerializer,
     LoginAttemptSerializer,
     EmailVerificationSerializer,
     LoginChallengeIssuedSerializer,
@@ -37,12 +39,15 @@ from .serializers import (
     LogoutSerializer,
     MeUpdateSerializer,
     PasswordChangeSerializer,
+    RegistrationRequestCreateSerializer,
+    RegistrationRequestSerializer,
     RoleSerializer,
     SetPasswordSerializer,
     UserAdminSerializer,
     UserCreateSerializer,
     UserSerializer,
     VerifyLoginCodeSerializer,
+    VerifyRegistrationSerializer,
 )
 
 
@@ -686,6 +691,211 @@ class UserViewSet(viewsets.ModelViewSet):
 )
 class LoginAttemptViewSet(viewsets.ReadOnlyModelViewSet):
     """The audit trail. Read-only at every level — these rows are never edited."""
+
+    queryset = LoginAttempt.objects.select_related("user").all()
+    serializer_class = LoginAttemptSerializer
+    permission_classes = [*AUTHENTICATED, CanUpdateTables]
+    filterset_fields = ["email", "succeeded", "user"]
+
+
+# ---------------------------------------------------------------------------
+# Self-registration
+# ---------------------------------------------------------------------------
+
+
+@extend_schema(
+    tags=["Authentication"],
+    summary="Ask for an account",
+    request=RegistrationRequestCreateSerializer,
+    responses={201: RegistrationRequestSerializer},
+    description=(
+        "Open to anyone — there is no account yet to authenticate as. Name, "
+        "email and phone number only: **not** a role, which only a lead may "
+        "assign, and only once reviewing this request.\n\n"
+        "Creates nothing more than a request. Nobody can sign in from this "
+        "alone — a lead must approve it first, at `POST "
+        "/api/auth/registration-requests/{id}/approve/`, the same way "
+        "`POST /api/auth/users/` creates an account today."
+    ),
+)
+class RegistrationRequestCreateView(APIView):
+    """POST /api/auth/register/."""
+
+    permission_classes = [AllowAny]
+    serializer_class = RegistrationRequestCreateSerializer
+    throttle_classes = [LoginRateThrottle, LoginBurstRateThrottle]
+
+    def post(self, request):
+        serializer = RegistrationRequestCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        try:
+            with transaction.atomic():
+                registration = services.request_registration(
+                    **serializer.validated_data, http_request=request
+                )
+        except OSError as exc:
+            raise ServiceUnavailable(
+                "The request was not saved because the confirmation email "
+                "could not be sent. Nothing has been saved — try again, and "
+                "tell whoever runs the system if it keeps happening."
+            ) from exc
+
+        return Response(
+            RegistrationRequestSerializer(registration).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+
+@extend_schema(
+    tags=["Authentication"],
+    summary="Confirm a registration request's address",
+    request=VerifyRegistrationSerializer,
+    responses={200: OpenApiResponse(description="Confirmed.")},
+    description=(
+        "Confirms the code emailed immediately after `POST /auth/register/`. "
+        "Open, the same way `/auth/verify-email/` is — the registrant has no "
+        "account to authenticate with yet.\n\n"
+        "This does not create an account and does not sign anyone in. It "
+        "unlocks the request for a lead to review: `approve` on "
+        "`/auth/registration-requests/{id}/` is refused until this is done."
+    ),
+)
+class VerifyRegistrationView(APIView):
+    """POST /api/auth/register/verify/."""
+
+    permission_classes = [AllowAny]
+    serializer_class = VerifyRegistrationSerializer
+    throttle_classes = [LoginRateThrottle, LoginBurstRateThrottle]
+
+    def post(self, request):
+        serializer = VerifyRegistrationSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        try:
+            services.verify_registration_email(
+                serializer.validated_data["email"], serializer.validated_data["code"]
+            )
+        except services.VerificationUnusable as exc:
+            raise DRFValidationError({"code": str(exc)}) from exc
+
+        return Response(
+            {
+                "detail": (
+                    "Your email address is confirmed. AsOne's team will review "
+                    "your request and assign you a role — you will hear from "
+                    "them by email."
+                )
+            }
+        )
+
+
+@extend_schema(tags=["User administration"])
+class RegistrationRequestViewSet(viewsets.ReadOnlyModelViewSet):
+    """Review requests and decide them. Program Lead and Operations Manager
+    only, same as `UserViewSet` — approving one *is* creating a user.
+
+    Read-only at the ModelViewSet level: a request is never edited, only
+    approved or declined through the actions below.
+    """
+
+    permission_classes = [*AUTHENTICATED, CanUpdateTables]
+    queryset = RegistrationRequest.objects.select_related(
+        "decided_by", "created_user"
+    ).order_by("-created_at")
+    serializer_class = RegistrationRequestSerializer
+    filterset_fields = ["status"]
+
+    @extend_schema(
+        summary="Approve a registration request",
+        request=ApproveRegistrationSerializer,
+        responses={201: OpenApiResponse(description="Account created.")},
+        description=(
+            "Supplies the one thing a registrant could not: the role, and the "
+            "warehouse or school it requires. Creates the account and emails "
+            "the confirmation code exactly as `POST /api/auth/users/` does — "
+            "this is that same operation, reached from a request instead of a "
+            "blank form.\n\n"
+            "409 if the request was already approved or declined."
+        ),
+    )
+    @action(detail=True, methods=["post"])
+    def approve(self, request, pk=None):
+        registration = self.get_object()
+
+        serializer = ApproveRegistrationSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        try:
+            with transaction.atomic():
+                user, password = services.approve_registration(
+                    registration,
+                    decided_by=request.user,
+                    http_request=request,
+                    **serializer.validated_data,
+                )
+        except services.RegistrationAlreadyDecided as exc:
+            raise self._conflict(exc) from exc
+        except services.RegistrationEmailNotVerified as exc:
+            raise DRFValidationError({"detail": str(exc)}) from exc
+        except OSError as exc:
+            raise ServiceUnavailable(
+                "The account was not created because the confirmation email "
+                "could not be sent. Nothing has been saved — try again, and "
+                "tell whoever runs the system if it keeps happening."
+            ) from exc
+
+        return Response(
+            {
+                "user": UserAdminSerializer(user).data,
+                "password": password,
+                "detail": (
+                    f"Give this password to {user.get_full_name() or user.email} "
+                    "yourself — it is not emailed, and cannot be shown again. A "
+                    f"confirmation code has been emailed to {user.email}; they "
+                    "must enter it before they can sign in, and they will be "
+                    "asked to replace this password once they do."
+                ),
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+    @staticmethod
+    def _conflict(exc):
+        """Route RegistrationAlreadyDecided to a 409 rather than the 500 a
+        bare exception would raise — the request is fine, the state is not."""
+        conflict = APIException(str(exc), code="already_decided")
+        conflict.status_code = status.HTTP_409_CONFLICT
+        return conflict
+
+    @extend_schema(
+        summary="Decline a registration request",
+        request=DeclineRegistrationSerializer,
+        responses={200: RegistrationRequestSerializer},
+        description=(
+            "Refuses the request. No account is created and nothing is "
+            "emailed to the registrant — they simply see no reply and may "
+            "submit the form again.\n\n"
+            "409 if the request was already approved or declined."
+        ),
+    )
+    @action(detail=True, methods=["post"])
+    def decline(self, request, pk=None):
+        registration = self.get_object()
+
+        serializer = DeclineRegistrationSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        try:
+            services.decline_registration(
+                registration,
+                decided_by=request.user,
+                notes=serializer.validated_data.get("notes", ""),
+            )
+        except services.RegistrationAlreadyDecided as exc:
+            raise self._conflict(exc) from exc
+
+        return Response(RegistrationRequestSerializer(registration).data)
 
     permission_classes = [*AUTHENTICATED, CanUpdateTables]
     queryset = LoginAttempt.objects.select_related("user")
