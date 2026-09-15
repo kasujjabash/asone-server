@@ -221,11 +221,12 @@ def needs_attention(warehouse=None, user=None):
     Rows with a count of zero are omitted. An empty list means there is
     genuinely nothing to do, which is worth being able to say.
 
-    ``user`` is needed for the rows that are not about a site at all. A
-    pending registration belongs to whoever administers accounts, not to a
-    warehouse, so it cannot be selected by `warehouse` the way the rest are.
-    Omitted when no user is passed, which keeps every existing caller — and
-    every test — behaving exactly as before.
+    ``user`` gates `registrations_pending`, the one row that is not about a
+    site at all — a pending registration belongs to whoever administers
+    accounts, not to a warehouse, so it cannot be selected by `warehouse`
+    the way the rest are, and not everyone who can see this list is allowed
+    to act on it (see below). Omitted when no user is passed, which keeps
+    every existing caller — and every test — behaving exactly as before.
     """
     alerts = []
 
@@ -259,33 +260,6 @@ def needs_attention(warehouse=None, user=None):
                 ),
             }
         )
-
-    # Somebody asked for an account and is waiting on a human. Only the
-    # roles that can actually approve one are shown it — a row nobody can
-    # act on is noise, and this is the list people are meant to trust.
-    #
-    # Unverified requests are excluded: a lead cannot approve a request whose
-    # email address nobody has proved they hold, so surfacing one would
-    # present work that cannot be done. It appears the moment they enter
-    # their code.
-    if user is not None and has_role(user, *ALL_SITE_ROLES):
-        pending = RegistrationRequest.objects.filter(
-            status=RegistrationRequest.Status.PENDING,
-            verified_at__isnull=False,
-        ).count()
-        if pending:
-            alerts.append(
-                {
-                    "kind": "registrations_pending",
-                    "level": HOLD,
-                    "count": pending,
-                    "message": (
-                        f"{pending} people waiting for an account"
-                        if pending != 1
-                        else "1 person waiting for an account"
-                    ),
-                }
-            )
 
     unreconciled = len(receipts_needing_reconciliation(warehouse))
     if unreconciled:
@@ -336,6 +310,42 @@ def needs_attention(warehouse=None, user=None):
                 ),
             }
         )
+
+    # Registration requests, not stock — gated on the same roles as the
+    # approve/decline endpoints (`CanUpdateTables`: Program Lead and
+    # Operations Manager), not on warehouse scope. Finance and Warehouse
+    # Staff can see the rest of this list but cannot act on a registration,
+    # so showing them this row would point at a 403.
+    #
+    # One alert per request, not a single rolled-up count. Every other kind
+    # here is a count over many rows because there is nowhere for one row to
+    # link to — but a registration is a specific person a lead reviews one
+    # at a time, so each gets its own row and its own `ref_id` to open
+    # straight into that person's review, the same way an order or a receipt
+    # would if this list linked to records instead of screens.
+    #
+    # Unverified requests are excluded: a lead cannot approve a request whose
+    # email address nobody has proved they hold, so surfacing one would
+    # present work that cannot be done. It appears the moment they enter
+    # their code.
+    if has_role(user, *ALL_SITE_ROLES):
+        pending = RegistrationRequest.objects.filter(
+            status=RegistrationRequest.Status.PENDING,
+            verified_at__isnull=False,
+        ).order_by("-created_at")
+        for registration in pending:
+            alerts.append(
+                {
+                    "kind": "registrations_pending",
+                    "level": READY,
+                    "count": 1,
+                    "ref_id": registration.id,
+                    "message": (
+                        f"{registration.first_name} {registration.last_name} "
+                        "asked for an account"
+                    ),
+                }
+            )
 
     return alerts
 
@@ -507,7 +517,7 @@ def daily_order_volume(warehouse=None, date_from=None, date_to=None):
 # ---------------------------------------------------------------------------
 
 
-def notifications(warehouse=None):
+def notifications(warehouse=None, user=None):
     """What the bell in the header shows, and its badge count.
 
     ## What this is, and what it deliberately is not
@@ -535,7 +545,7 @@ def notifications(warehouse=None):
     and when, that is a stored model with per-user read state — a different
     feature, not a bigger version of this one.
     """
-    alerts = needs_attention(warehouse)
+    alerts = needs_attention(warehouse, user=user)
 
     return {
         "unread_count": len(alerts),
@@ -545,6 +555,7 @@ def notifications(warehouse=None):
                 "level": alert["level"],
                 "message": alert["message"],
                 "count": alert["count"],
+                "ref_id": alert.get("ref_id"),
             }
             for alert in alerts
         ],

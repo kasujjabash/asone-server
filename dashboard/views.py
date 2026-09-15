@@ -233,7 +233,7 @@ class OrderVolumeView(_WarehouseScoped):
 )
 class NotificationsView(_WarehouseScoped):
     def get(self, request):
-        rows = services.notifications(self.warehouse_for(request))
+        rows = services.notifications(self.warehouse_for(request), user=request.user)
         return Response(NotificationsSerializer(rows).data)
 
 

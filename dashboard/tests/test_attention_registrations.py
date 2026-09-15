@@ -58,23 +58,35 @@ class AttentionSetup(APITestCase):
 
 
 class PendingRegistrationsAreSurfaced(AttentionSetup):
+    def registration_rows(self, user=None, warehouse=None):
+        return [
+            r
+            for r in services.needs_attention(warehouse, user=user)
+            if r["kind"] == "registrations_pending"
+        ]
+
     def test_a_lead_is_told_somebody_is_waiting(self):
-        self.request_account("grace@example.com", verified=True)
+        request = self.request_account("grace@example.com", verified=True)
 
-        row = self.row("registrations_pending", user=self.sharon)
+        rows = self.registration_rows(user=self.sharon)
 
-        self.assertIsNotNone(row)
-        self.assertEqual(row["count"], 1)
-        self.assertEqual(row["message"], "1 person waiting for an account")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["count"], 1)
+        self.assertEqual(rows[0]["ref_id"], request.id)
+        self.assertEqual(rows[0]["message"], "Grace Nakato asked for an account")
 
     def test_several_read_correctly(self):
-        for n in range(3):
-            self.request_account(f"g{n}@example.com", verified=True)
+        """One row per request, not a single rolled-up count — each links
+        through `ref_id` to that person's own review, not a shared screen."""
+        requests = [
+            self.request_account(f"g{n}@example.com", verified=True) for n in range(3)
+        ]
 
-        self.assertEqual(
-            self.row("registrations_pending", user=self.sharon)["message"],
-            "3 people waiting for an account",
-        )
+        rows = self.registration_rows(user=self.sharon)
+
+        self.assertEqual(len(rows), 3)
+        self.assertEqual({r["ref_id"] for r in rows}, {r.id for r in requests})
+        self.assertTrue(all(r["count"] == 1 for r in rows))
 
     def test_an_unverified_request_is_not_shown(self):
         """A lead cannot approve a request whose address nobody has proved
