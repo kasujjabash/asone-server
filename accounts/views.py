@@ -834,8 +834,6 @@ class RegistrationRequestViewSet(viewsets.ReadOnlyModelViewSet):
                 )
         except services.RegistrationAlreadyDecided as exc:
             raise self._conflict(exc) from exc
-        except services.RegistrationEmailNotVerified as exc:
-            raise DRFValidationError({"detail": str(exc)}) from exc
         except OSError as exc:
             raise ServiceUnavailable(
                 "The account was not created because the confirmation email "
