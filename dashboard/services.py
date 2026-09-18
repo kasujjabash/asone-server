@@ -980,6 +980,118 @@ def school_backorders(school):
     ]
 
 
+def school_needs_attention(school):
+    """The alert list for a school — the school-side twin of `needs_attention`.
+
+    ## Why this exists at all
+
+    The bell was hidden from School Staff, on the reasoning that
+    `/dashboard/notifications/` is the warehouse's and a school is refused
+    it. That was half right and wrong where it counted: the endpoint is
+    indeed the warehouse's, but a school has things waiting on **it**, and
+    taking the bell away left the one role with a personal to-do list as the
+    only role with nowhere to read it.
+
+    The clearest case is a delivery. A parcel that left three weeks ago and
+    never arrived looks exactly like one that arrived safely until somebody
+    confirms it, and **only the school can confirm** — `confirm_receipt()`
+    is theirs. The warehouse's own bell already carries
+    `deliveries_unconfirmed`, so the fact was being reported to everyone
+    except the person who can act on it.
+
+    ## Same shape, different conditions
+
+    Returns the rows `notifications()` wraps, so one bell component draws
+    both feeds and the two cannot drift apart in structure.
+
+    The conditions are the school's own, and every one of them is something
+    a school can *do* rather than merely know:
+
+      * a parcel to confirm
+      * an invoice to pay
+      * a backorder to expect — the one informational row, because it is the
+        answer a school gives a parent asking where the shirt is
+
+    Derived, not stored, exactly as the warehouse feed is: reading them does
+    not clear them, and the count falls when the parcel is confirmed or the
+    invoice paid. See `notifications()` for the full reasoning and for what a
+    real inbox would need instead.
+    """
+    alerts = []
+
+    # Everything unconfirmed, not just what is fourteen days old. The
+    # warehouse's row uses that threshold because it is chasing exceptions;
+    # the school is doing the confirming, so a parcel that landed this
+    # morning is already its job.
+    to_confirm = school_deliveries_to_confirm(school)
+    if to_confirm:
+        # The oldest is the one worth chasing, and the list is already
+        # ordered that way — so the row can link at one parcel when there is
+        # exactly one and stay a rollup when there are several.
+        oldest = to_confirm[0]
+        alerts.append(
+            {
+                "kind": "deliveries_to_confirm",
+                "level": CRITICAL if oldest["days_in_transit"] >= 14 else READY,
+                "count": len(to_confirm),
+                "message": (
+                    f"{len(to_confirm)} deliver"
+                    f"{'y' if len(to_confirm) == 1 else 'ies'} to confirm"
+                ),
+                "ref_id": oldest["order_id"] if len(to_confirm) == 1 else None,
+            }
+        )
+
+    unpaid = SchoolOrder.objects.filter(
+        school=school, status=OrderStatus.HOLD
+    ).count()
+    if unpaid:
+        alerts.append(
+            {
+                "kind": "school_orders_unpaid",
+                "level": HOLD,
+                "count": unpaid,
+                "message": (
+                    f"{unpaid} order{'' if unpaid == 1 else 's'} waiting for payment"
+                ),
+            }
+        )
+
+    waiting = len(school_backorders(school))
+    if waiting:
+        alerts.append(
+            {
+                "kind": "school_backorders",
+                "level": INSPECTION,
+                "count": waiting,
+                "message": (
+                    f"{waiting} item{'' if waiting == 1 else 's'} on backorder"
+                ),
+            }
+        )
+
+    return alerts
+
+
+def school_notifications(school):
+    """The bell for a school. Same contract as `notifications()`."""
+    alerts = school_needs_attention(school)
+
+    return {
+        "unread_count": len(alerts),
+        "notifications": [
+            {
+                "kind": alert["kind"],
+                "level": alert["level"],
+                "message": alert["message"],
+                "count": alert["count"],
+                "ref_id": alert.get("ref_id"),
+            }
+            for alert in alerts
+        ],
+    }
+
+
 def school_dashboard(school):
     """Everything the school's screen shows, in one round trip.
 

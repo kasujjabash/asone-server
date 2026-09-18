@@ -430,3 +430,45 @@ class SchoolDashboardView(APIView):
 
         data = services.school_dashboard(school)
         return Response(SchoolDashboardSerializer(data).data)
+
+
+@extend_schema(
+    tags=["Dashboard"],
+    summary="Notifications — the bell, for a school",
+    responses=NotificationsSerializer,
+    description=(
+        "The school-side twin of `notifications/`, and the same contract: "
+        "**derived, not stored**, so reading them does not clear the count. "
+        "It falls when the parcel is confirmed or the invoice is paid.\n\n"
+        "A separate endpoint rather than a wider audience on the warehouse "
+        "one, for the same reason the two dashboards are separate screens: "
+        "a school holds no stock, so 'SKUs below minimum' is somebody else's "
+        "building.\n\n"
+        "The rows are the school's own, and every one of them is something "
+        "it can act on — a parcel to confirm, an invoice to pay, a backorder "
+        "to expect. **Confirming a delivery is the school's alone**, which is "
+        "why hiding the bell from them left the only role with a personal "
+        "to-do list with nowhere to read it."
+    ),
+)
+class SchoolNotificationsView(APIView):
+    """The bell for a school. Scoped to the caller's own school, like its
+    dashboard — there is no `?school=`."""
+
+    permission_classes = [*AUTHENTICATED, CanSeeSchoolDashboard]
+
+    def get(self, request):
+        school = request.user.school
+        if school is None:
+            raise DRFValidationError(
+                {
+                    "school": (
+                        "This account is not attached to a school, so it has "
+                        "nothing to notify you about. Ask a lead to set one."
+                    )
+                }
+            )
+
+        return Response(
+            NotificationsSerializer(services.school_notifications(school)).data
+        )

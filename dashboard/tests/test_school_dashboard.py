@@ -328,3 +328,92 @@ class TheLeadHearsAboutALostParcel(SchoolDashboardSetup):
         confirm_receipt(shipment, confirmed_by=self.clerk)
 
         self.assertNotIn("deliveries_unconfirmed", self.attention())
+
+
+class TheSchoolHasABellOfItsOwn(SchoolDashboardSetup):
+    """The school-side notification feed.
+
+    The bell was hidden from School Staff on the grounds that
+    `/dashboard/notifications/` is the warehouse's and a school is refused
+    it. Half right: the endpoint is indeed the warehouse's, but a school has
+    things waiting on *it*, and confirming a delivery is theirs alone — so
+    taking the bell away left the one role with a personal to-do list with
+    nowhere to read it.
+    """
+
+    #: Not `self.url` — the base setUp already binds that to the dashboard.
+    def bell(self):
+        return reverse("dashboard:school-notifications")
+
+    def kinds(self):
+        response = self.client.get(self.bell())
+        self.assertEqual(response.status_code, 200)
+        return {row["kind"]: row for row in response.data["notifications"]}
+
+    def test_a_quiet_school_shows_nothing(self):
+        self.client.force_authenticate(self.clerk)
+
+        response = self.client.get(self.bell())
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["unread_count"], 0)
+        self.assertEqual(response.data["notifications"], [])
+
+    def test_an_unconfirmed_parcel_is_the_schools_to_do(self):
+        self.shipped_order()
+        self.client.force_authenticate(self.clerk)
+
+        row = self.kinds()["deliveries_to_confirm"]
+
+        self.assertEqual(row["count"], 1)
+        self.assertIn("confirm", row["message"])
+
+    def test_one_parcel_links_at_that_order(self):
+        """A rollup has nowhere to send you; a single parcel does."""
+        order = self.shipped_order()
+        self.client.force_authenticate(self.clerk)
+
+        self.assertEqual(self.kinds()["deliveries_to_confirm"]["ref_id"], order.pk)
+
+    def test_several_parcels_stay_a_rollup(self):
+        self.shipped_order()
+        self.shipped_order()
+        self.client.force_authenticate(self.clerk)
+
+        row = self.kinds()["deliveries_to_confirm"]
+
+        self.assertEqual(row["count"], 2)
+        self.assertIsNone(row["ref_id"])
+
+    def test_an_unpaid_order_is_reported_to_the_school_too(self):
+        self.order()
+        self.client.force_authenticate(self.clerk)
+
+        self.assertEqual(self.kinds()["school_orders_unpaid"]["count"], 1)
+
+    def test_confirming_the_parcel_clears_the_row(self):
+        """Derived, not stored: the count falls when the work is done, never
+        because somebody opened the panel."""
+        from orders.models import Shipment
+        from orders.services import confirm_receipt
+
+        self.shipped_order()
+        self.client.force_authenticate(self.clerk)
+        self.assertIn("deliveries_to_confirm", self.kinds())
+
+        confirm_receipt(
+            Shipment.objects.get(school=self.school), confirmed_by=self.clerk
+        )
+
+        self.assertNotIn("deliveries_to_confirm", self.kinds())
+
+    def test_a_warehouse_clerk_is_refused(self):
+        """It reads `request.user.school`. A clerk has none."""
+        self.client.force_authenticate(self.julius)
+
+        self.assertEqual(self.client.get(self.bell()).status_code, 403)
+
+    def test_a_lead_is_refused_too(self):
+        self.client.force_authenticate(self.lead)
+
+        self.assertEqual(self.client.get(self.bell()).status_code, 403)

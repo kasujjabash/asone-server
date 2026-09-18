@@ -15,6 +15,14 @@ urlpatterns = [
     path("activity/", views.ActivityView.as_view(), name="activity"),
     path("order-volume/", views.OrderVolumeView.as_view(), name="order-volume"),
     path("notifications/", views.NotificationsView.as_view(), name="notifications"),
+    # The school's bell, like its dashboard: a different endpoint, not this
+    # one with a wider audience. A school holds no stock, so most of the
+    # warehouse's alerts are about somebody else's building.
+    path(
+        "school/notifications/",
+        views.SchoolNotificationsView.as_view(),
+        name="school-notifications",
+    ),
     path(
         "inventory-by-warehouse/",
         views.InventoryByWarehouseView.as_view(),
