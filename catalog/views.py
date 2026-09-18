@@ -47,7 +47,9 @@ from .serializers import (
     KitItemSerializer,
     KitSerializer,
     MinimumStockLevelSerializer,
+    KitPriceListRowSerializer,
     PriceListRowSerializer,
+    UnpriceableKitSerializer,
     RepriceSerializer,
     SchoolSerializer,
     SizeSerializer,
@@ -391,6 +393,69 @@ class PriceListView(APIView):
         level = _price_list_level(request)
         rows = services.price_list(level, _requested_date(request))
         return Response(PriceListRowSerializer(rows, many=True).data)
+
+
+@extend_schema(
+    tags=["Master data — pricing"],
+    summary="Kit price list for Primary or High School",
+    parameters=[
+        OpenApiParameter("level", str, description="`PS` or `HS`.", required=True),
+        OpenApiParameter("on", str, description="Date, `YYYY-MM-DD`. Defaults to today."),
+    ],
+    responses=KitPriceListRowSerializer(many=True),
+    description=(
+        "The **kit** half of F15 and F51 — AsOne asks for printable price "
+        "lists at SKU and Uniform Kit level, and `/price-lists/` is the "
+        "garment half.\n\n"
+        "A kit's price is the sum of its components at their price on the "
+        "date, calculated rather than stored: a kit has no price of its own, "
+        "and giving it one would let the two disagree the first time a "
+        "component moved.\n\n"
+        "**A kit that cannot be priced is omitted**, exactly as an unpriced "
+        "garment is — and a kit is unpriceable when *any* component has no "
+        "price, or when it has no components. That means a fully priced-"
+        "looking catalogue can still be missing kits, which is what "
+        "`/price-lists/kits/gaps/` is for.\n\n"
+        "Unlike garments there is no `BOTH`: a kit belongs to one school "
+        "level and appears on one list."
+    ),
+)
+class KitPriceListView(APIView):
+    """F15 and F51, at kit level."""
+
+    permission_classes = MASTER_DATA
+    read_roles = (Role.WAREHOUSE_STAFF, Role.SCHOOL_STAFF, Role.FINANCE)
+
+    def get(self, request):
+        level = _price_list_level(request)
+        rows = services.kit_price_list(level, _requested_date(request))
+        return Response(KitPriceListRowSerializer(rows, many=True).data)
+
+
+@extend_schema(
+    tags=["Master data — pricing"],
+    summary="Kits that cannot be priced",
+    parameters=[
+        OpenApiParameter("on", str, description="Date, `YYYY-MM-DD`. Defaults to today."),
+        OpenApiParameter("level", str, description="Limit to `PS` or `HS`."),
+    ],
+    responses=UnpriceableKitSerializer(many=True),
+    description=(
+        "The gap report behind the kit price list. Each row names the "
+        "**component garments** missing a price, because the cause is almost "
+        "never the kit itself — reporting only the kit sends somebody to fix "
+        "the wrong record."
+    ),
+)
+class KitPriceGapView(APIView):
+    permission_classes = MASTER_DATA
+    read_roles = (Role.FINANCE,)
+
+    def get(self, request):
+        gaps = services.kits_without_a_price(
+            _requested_date(request), _requested_level(request, required=False)
+        )
+        return Response(UnpriceableKitSerializer(gaps, many=True).data)
 
 
 @extend_schema(

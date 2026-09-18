@@ -100,22 +100,22 @@ class Settings(models.Model):
     backorder_allocation_alerts_enabled = models.BooleanField(default=True)
 
     # ---------------------------------------------------------------------
-    # Synchronization
+    # Synchronization — REMOVED, deliberately
     #
-    # Stored only. This is a plain server-rendered web app with no offline
-    # cache anywhere in it — nothing reads either field today. Kept because
-    # the design calls for them and a value that round-trips honestly is
-    # better than a control that silently does nothing when saved, but
-    # wiring an actual offline mode is a separate, much larger feature.
-    # ---------------------------------------------------------------------
-    auto_sync_interval_minutes = models.PositiveIntegerField(
-        default=5,
-        help_text="Stored for a future offline mode. No code reads this value today.",
-    )
-    offline_data_retention_days = models.PositiveIntegerField(
-        default=30,
-        help_text="Stored for a future offline mode. No code reads this value today.",
-    )
+    # `auto_sync_interval_minutes` and `offline_data_retention_days` used to
+    # live here because the Settings design draws a Synchronization panel.
+    # They are gone, and this note is here so nobody adds them back from the
+    # design.
+    #
+    # Decision D3 is explicit: **no offline data entry.** A site that loses
+    # internet loses access until it returns — AsOne chose that over sync
+    # complexity. Offering to tune a sync interval advertises a feature that
+    # was deliberately not built, which is worse than the setting not
+    # existing: a lead would configure it and reasonably expect it to work.
+    #
+    # Dropped with AsOne (Jim) on 18 September 2026. The design predates that
+    # decision; the same applies to the "Online · Synced just now" indicator
+    # the design draws in the top bar, which `TopBar.tsx` also omits.
 
     # ---------------------------------------------------------------------
     # Printing Preferences
@@ -147,8 +147,21 @@ class Settings(models.Model):
             raise ValidationError("There is only one Settings row. Edit it instead of adding another.")
 
     def save(self, *args, **kwargs):
+        """Pin to row 1, whatever the caller thought they were creating.
+
+        `validate_unique=False` is deliberate and load-bearing. The pk is
+        pinned on the line above, so a *new* instance reaching `full_clean()`
+        with the row already present failed its own uniqueness check and
+        raised "Settings with this ID already exists" — which is both wrong
+        (there is meant to be exactly one; overwriting it is the intended
+        behaviour) and unreadable, since it blames the ID rather than saying
+        anything about settings.
+
+        Nothing is lost by skipping it: `id` is the only unique column on
+        this model, and it is pinned. Every other field is still validated.
+        """
         self.pk = 1
-        self.full_clean()
+        self.full_clean(validate_unique=False)
         super().save(*args, **kwargs)
 
     def delete(self, *args, **kwargs):

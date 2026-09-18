@@ -299,6 +299,54 @@ class AmendmentTests(ProcurementSetup):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["status"], OrderStatus.CANCELLED)
 
+    def test_an_order_with_goods_received_cannot_be_cancelled(self):
+        """Receipts point at the order and carry the value the ledger was
+        written from. Cancelling it would leave posted stock attributed to an
+        order claiming it was never placed."""
+        from procurement.services import create_receipt, post_receipt
+        from procurement.models import ProductionOrder
+
+        order = ProductionOrder.objects.get(pk=self.order["id"])
+        line = order.lines.first()
+        receipt = create_receipt(
+            production_order=order,
+            lines=[{"sku": line.sku, "quantity_received": 1}],
+            created_by=self.users[Role.WAREHOUSE_STAFF],
+            packing_list_number="PL-1",
+            date_received=ORDER_DATE,
+        )
+        post_receipt(receipt, posted_by=self.users[Role.WAREHOUSE_STAFF])
+
+        response = self.client.patch(
+            self.detail(), {"status": OrderStatus.CANCELLED}, format="json"
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("Close it instead", str(response.data))
+
+    def test_such_an_order_can_still_be_closed(self):
+        """The honest ending for an order that was partly delivered."""
+        from procurement.services import create_receipt, post_receipt
+        from procurement.models import ProductionOrder
+
+        order = ProductionOrder.objects.get(pk=self.order["id"])
+        line = order.lines.first()
+        receipt = create_receipt(
+            production_order=order,
+            lines=[{"sku": line.sku, "quantity_received": 1}],
+            created_by=self.users[Role.WAREHOUSE_STAFF],
+            packing_list_number="PL-2",
+            date_received=ORDER_DATE,
+        )
+        post_receipt(receipt, posted_by=self.users[Role.WAREHOUSE_STAFF])
+
+        response = self.client.patch(
+            self.detail(), {"status": OrderStatus.CLOSED}, format="json"
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["status"], OrderStatus.CLOSED)
+
     def test_an_order_cannot_be_deleted(self):
         """It funds a Tailoring Center — the document has to survive."""
         response = self.client.delete(self.detail())

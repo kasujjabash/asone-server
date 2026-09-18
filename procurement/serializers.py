@@ -275,6 +275,14 @@ class OrderAmendSerializer(serializers.Serializer):
 
     Cancelling is a status change, not a delete: an order funds a Tailoring
     Center, so the document has to survive being withdrawn.
+
+    **An order goods have already arrived against cannot be cancelled.** That
+    guard is here rather than in the view because it is a fact about the
+    document, not about who is asking: receipts point at this order and carry
+    the value the ledger was written from, so cancelling it would leave posted
+    stock attributed to an order that claims it was never placed. Close it
+    instead — that says the order is finished, which is what actually
+    happened.
     """
 
     status = serializers.ChoiceField(choices=OrderStatus.choices, required=False)
@@ -287,6 +295,26 @@ class OrderAmendSerializer(serializers.Serializer):
                 "Nothing to change. Amendable fields: status, "
                 "due_in_warehouse_date, notes."
             )
+
+        # `quantity_received` is a production-order property; this serializer
+        # also amends group orders, which have no receipts and so nothing to
+        # orphan. getattr rather than a type check, so a third document type
+        # that grows receipts is covered the day it does.
+        order = self.context.get("order")
+        if (
+            attrs.get("status") == OrderStatus.CANCELLED
+            and getattr(order, "quantity_received", 0) > 0
+        ):
+            raise serializers.ValidationError(
+                {
+                    "status": (
+                        f"{order.number} cannot be cancelled: "
+                        f"{order.quantity_received} units have already been "
+                        "received against it. Close it instead."
+                    )
+                }
+            )
+
         return attrs
 
 
@@ -433,6 +461,22 @@ class OutstandingRowSerializer(serializers.Serializer):
 # ---------------------------------------------------------------------------
 # Costed reports — F55, F56
 # ---------------------------------------------------------------------------
+
+
+class GroupOrderTotalSerializer(serializers.Serializer):
+    """The single figure at the top of the costed report — F55.
+
+    Exists so `value` goes out as a **decimal string**, like every other money
+    field in this API. The view used to return the raw dict, and DRF's JSON
+    encoder turns a bare `Decimal` into a float — so the totals read
+    `24000000.0` while the rows beneath them read `"24000000.00"`. A client
+    summing money with exact arithmetic then had a float in the middle of it,
+    which is the one thing the money handling on both sides exists to avoid.
+    """
+
+    orders = serializers.IntegerField()
+    quantity = serializers.IntegerField()
+    value = serializers.DecimalField(max_digits=18, decimal_places=2)
 
 
 class GroupOrderCostedSerializer(serializers.Serializer):

@@ -251,6 +251,39 @@ class PriceListRowSerializer(serializers.Serializer):
     unit_price = serializers.DecimalField(max_digits=12, decimal_places=2)
 
 
+class KitPriceListRowSerializer(serializers.Serializer):
+    """One line of the **kit** price list — F15, F51.
+
+    `unit_price` is the sum of the kit's components at their price on the
+    date, calculated rather than stored: a kit has no price of its own, and
+    giving it one would let the two disagree the first time a component moved.
+    """
+
+    kit_id = serializers.IntegerField(source="kit.id")
+    kit_number = serializers.CharField(source="kit.kit_number")
+    name = serializers.CharField(source="kit.name")
+    item_count = serializers.IntegerField(help_text="Garments in the kit, counting quantities.")
+    unit_price = serializers.DecimalField(max_digits=14, decimal_places=2)
+
+
+class UnpriceableKitSerializer(serializers.Serializer):
+    """A kit that would be left off a price list, and why.
+
+    The cause is usually a component, not the kit — so the row names the
+    garments that are missing a price rather than only reporting the kit,
+    which would send somebody to fix the wrong record.
+    """
+
+    kit_id = serializers.IntegerField(source="kit.id")
+    kit_number = serializers.CharField(source="kit.kit_number")
+    name = serializers.CharField(source="kit.name")
+    school_level = serializers.CharField(source="kit.school_level")
+    unpriced_components = serializers.ListField(child=serializers.CharField())
+    has_no_items = serializers.BooleanField(
+        help_text="True when the kit is empty — a different problem with the same symptom."
+    )
+
+
 # ---------------------------------------------------------------------------
 # SKUs
 # ---------------------------------------------------------------------------

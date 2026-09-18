@@ -44,6 +44,7 @@ from .models import (
 )
 from .serializers import (
     GroupOrderCostedSerializer,
+    GroupOrderTotalSerializer,
     GroupOrderSerializer,
     OrderAmendSerializer,
     OutstandingRowSerializer,
@@ -101,7 +102,11 @@ class OrderViewSetMixin:
         """Amend the header. Lines are F18 and are not editable yet."""
         order = self.get_object()
 
-        serializer = OrderAmendSerializer(data=request.data)
+        # The order goes in the context so the serializer can refuse to
+        # cancel one that goods have already arrived against.
+        serializer = OrderAmendSerializer(
+            data=request.data, context={"order": order}
+        )
         serializer.is_valid(raise_exception=True)
 
         for field, value in serializer.validated_data.items():
@@ -457,9 +462,9 @@ class GroupOrdersCostedView(APIView):
         rows = reports.group_orders_costed(date_from, date_to, include_cancelled)
         return Response(
             {
-                "totals": reports.group_order_total(
-                    date_from, date_to, include_cancelled
-                ),
+                "totals": GroupOrderTotalSerializer(
+                    reports.group_order_total(date_from, date_to, include_cancelled)
+                ).data,
                 "orders": GroupOrderCostedSerializer(rows, many=True).data,
             }
         )

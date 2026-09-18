@@ -137,6 +137,113 @@ def price_list(school_level, on_date=None):
     ]
 
 
+def kit_price_list(school_level, on_date=None):
+    """The **kit** half of a price list — F15 and F51.
+
+    AsOne's checklist asks for printable price lists "at SKU and Uniform Kit
+    level". `price_list()` above is the garment half; this is the other, and
+    a school ordering a starter kit needs it more than the component list —
+    the kit is what they actually buy.
+
+    Returns ``[{"kit": Kit, "unit_price": Decimal, "item_count": int}, ...]``,
+    ordered by name.
+
+    **A kit that cannot be priced is omitted**, exactly as an unpriced garment
+    is, and for the same reason: a line with no price on a document a school
+    buys from is worse than no line. A kit is unpriceable when any component
+    has no price on the date, or when it has no components at all — see
+    `kit_prices()`, which refuses to sum around a missing price rather than
+    quietly returning a total short by one component.
+
+    Which means a *priced* garment can still leave a kit off this list, and
+    nothing about the kit itself will look wrong. `kits_without_a_price()`
+    below is how that is found before publishing.
+
+    Unlike garments there is no BOTH: `Kit.SchoolLevel` has two values, so a
+    kit appears on exactly one list.
+    """
+    from .models import Kit
+
+    on_date = on_date or date.today()
+
+    kits = list(Kit.objects.filter(is_active=True, school_level=school_level).order_by("name"))
+    if not kits:
+        return []
+
+    totals = kit_prices(kits, on_date)
+    counts = {
+        kit.pk: sum(item.quantity for item in kit.items.all())
+        for kit in Kit.objects.filter(pk__in=[k.pk for k in kits]).prefetch_related("items")
+    }
+
+    return [
+        {"kit": kit, "unit_price": totals[kit.pk], "item_count": counts.get(kit.pk, 0)}
+        for kit in kits
+        if totals.get(kit.pk) is not None
+    ]
+
+
+def kits_without_a_price(on_date=None, school_level=None):
+    """Active kits that cannot be priced on ``on_date`` — the gap report.
+
+    The kit-level twin of `garments_without_a_price()`. Run it before
+    publishing a price list, or a kit silently disappears from what the
+    schools can order.
+
+    The cause is usually not the kit: one component garment has no price, and
+    the kit inherits that. So each row says which components are the problem,
+    because "PS Starter Kit is unpriced" sends somebody looking at the kit
+    when the fix is on a garment.
+    """
+    from .models import Kit
+
+    on_date = on_date or date.today()
+
+    kits = Kit.objects.filter(is_active=True)
+    if school_level:
+        kits = kits.filter(school_level=school_level)
+    kits = list(kits.prefetch_related("items__sku__garment").order_by("name"))
+    if not kits:
+        return []
+
+    totals = kit_prices(kits, on_date)
+
+    rows = []
+    for kit in kits:
+        if totals.get(kit.pk) is not None:
+            continue
+
+        priced = {
+            garment.pk
+            for garment in with_current_price(
+                Garment.objects.filter(
+                    pk__in=[item.sku.garment_id for item in kit.items.all()]
+                ),
+                on_date,
+            )
+            if getattr(garment, CURRENT_PRICE_ANNOTATION) is not None
+        }
+        missing = sorted(
+            {
+                item.sku.garment.name
+                for item in kit.items.all()
+                if item.sku.garment_id not in priced
+            }
+        )
+
+        rows.append(
+            {
+                "kit": kit,
+                # Empty when the kit simply has no components — a different
+                # problem with the same symptom, and worth telling apart.
+                "unpriced_components": missing,
+                "has_no_items": not kit.items.all(),
+            }
+        )
+
+    return rows
+
+
 def garments_without_a_price(on_date=None, school_level=None):
     """Active garments with no price on ``on_date``.
 

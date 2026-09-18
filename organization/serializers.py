@@ -57,8 +57,6 @@ class SettingsSerializer(serializers.ModelSerializer):
             "low_stock_alerts_enabled",
             "receipt_discrepancy_alerts_enabled",
             "backorder_allocation_alerts_enabled",
-            "auto_sync_interval_minutes",
-            "offline_data_retention_days",
             "default_paper_size",
             "default_paper_size_display",
             "packing_list_layout",

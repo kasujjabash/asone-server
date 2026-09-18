@@ -236,3 +236,152 @@ class PriceDoesNotVaryBySizeTests(TestCase):
         self.assertNotIn(
             "size", [field.name for field in GarmentPrice._meta.get_fields()]
         )
+
+
+class KitPriceListTests(TestCase):
+    """F15 and F51 at kit level — the half the checklist asks for and the
+    garment list does not cover.
+
+    A kit is what a school actually buys, so a price list without kits on it
+    is only half a price list.
+    """
+
+    def setUp(self):
+        from catalog.models import Kit, KitItem, Size, Sku
+
+        self.shirt = make_garment("White Shirt", Garment.SchoolLevel.PRIMARY)
+        self.socks = make_garment("Socks", Garment.SchoolLevel.BOTH)
+        make_price(self.shirt, "25000.00", SEASON_START)
+        make_price(self.socks, "5000.00", SEASON_START)
+
+        size = Size.objects.create(name="10", sort_order=10)
+        self.shirt_sku = Sku.objects.create(garment=self.shirt, size=size)
+        self.socks_sku = Sku.objects.create(garment=self.socks, size=size)
+
+        self.kit = Kit.objects.create(
+            kit_number="PS-STARTER", name="PS Starter Kit",
+            school_level=Kit.SchoolLevel.PRIMARY,
+        )
+        KitItem.objects.create(kit=self.kit, sku=self.shirt_sku, quantity=2)
+        KitItem.objects.create(kit=self.kit, sku=self.socks_sku, quantity=3)
+
+    def rows(self, level=None):
+        from catalog.models import Kit
+        from catalog.services import kit_price_list
+
+        return kit_price_list(level or Kit.SchoolLevel.PRIMARY, SEASON_START)
+
+    def test_a_kit_is_priced_as_the_sum_of_its_components(self):
+        """Two shirts at 25,000 plus three socks at 5,000 — 65,000."""
+        row = self.rows()[0]
+
+        self.assertEqual(row["kit"], self.kit)
+        self.assertEqual(row["unit_price"], Decimal("65000.00"))
+
+    def test_the_item_count_counts_quantities_not_lines(self):
+        """Two shirts and three socks is five garments, on two lines."""
+        self.assertEqual(self.rows()[0]["item_count"], 5)
+
+    def test_a_kit_appears_on_one_list_only(self):
+        from catalog.models import Kit
+
+        self.assertEqual(len(self.rows(Kit.SchoolLevel.PRIMARY)), 1)
+        self.assertEqual(self.rows(Kit.SchoolLevel.HIGH), [])
+
+    def test_an_inactive_kit_is_left_off(self):
+        self.kit.is_active = False
+        self.kit.save()
+
+        self.assertEqual(self.rows(), [])
+
+    def test_a_kit_with_an_unpriced_component_is_omitted_entirely(self):
+        """Not shown short by that component — the whole line goes.
+
+        A price list is a document a school orders from, and a kit priced at
+        less than its contents is worse than a kit that is not offered.
+        """
+        from catalog.models import Kit, KitItem, Size, Sku
+
+        pe = make_garment("PE Shorts", Garment.SchoolLevel.PRIMARY)
+        KitItem.objects.create(
+            kit=self.kit,
+            sku=Sku.objects.create(
+                garment=pe, size=Size.objects.create(name="12", sort_order=12)
+            ),
+            quantity=1,
+        )
+
+        self.assertEqual(self.rows(), [])
+        self.assertEqual(Kit.objects.filter(is_active=True).count(), 1)
+
+    def test_a_kit_with_no_components_is_omitted(self):
+        from catalog.models import Kit
+
+        Kit.objects.create(
+            kit_number="EMPTY", name="Empty Kit",
+            school_level=Kit.SchoolLevel.PRIMARY,
+        )
+
+        self.assertEqual([row["kit"] for row in self.rows()], [self.kit])
+
+
+class KitPriceGapTests(TestCase):
+    """The gap report behind the kit list.
+
+    Its job is to name the *component* at fault. A kit going missing looks
+    like a problem with the kit, and it almost never is.
+    """
+
+    def setUp(self):
+        from catalog.models import Kit, KitItem, Size, Sku
+
+        self.shirt = make_garment("White Shirt", Garment.SchoolLevel.PRIMARY)
+        self.pe = make_garment("PE Shorts", Garment.SchoolLevel.PRIMARY)
+        make_price(self.shirt, "25000.00", SEASON_START)  # PE Shorts: unpriced
+
+        size = Size.objects.create(name="10", sort_order=10)
+        self.kit = Kit.objects.create(
+            kit_number="PS-STARTER", name="PS Starter Kit",
+            school_level=Kit.SchoolLevel.PRIMARY,
+        )
+        for garment in (self.shirt, self.pe):
+            KitItem.objects.create(
+                kit=self.kit,
+                sku=Sku.objects.create(garment=garment, size=size),
+                quantity=1,
+            )
+
+    def gaps(self):
+        from catalog.services import kits_without_a_price
+
+        return kits_without_a_price(SEASON_START)
+
+    def test_the_unpriceable_kit_is_reported(self):
+        self.assertEqual([row["kit"] for row in self.gaps()], [self.kit])
+
+    def test_it_names_the_component_at_fault(self):
+        """The whole point — "PS Starter Kit is unpriced" sends somebody to
+        the wrong record."""
+        self.assertEqual(self.gaps()[0]["unpriced_components"], ["PE Shorts"])
+
+    def test_a_priced_component_is_not_blamed(self):
+        self.assertNotIn("White Shirt", self.gaps()[0]["unpriced_components"])
+
+    def test_an_empty_kit_is_told_apart_from_a_missing_price(self):
+        """Same symptom, different problem."""
+        from catalog.models import Kit
+
+        empty = Kit.objects.create(
+            kit_number="EMPTY", name="Empty Kit",
+            school_level=Kit.SchoolLevel.PRIMARY,
+        )
+
+        row = next(r for r in self.gaps() if r["kit"] == empty)
+
+        self.assertTrue(row["has_no_items"])
+        self.assertEqual(row["unpriced_components"], [])
+
+    def test_pricing_the_component_clears_the_gap(self):
+        make_price(self.pe, "12000.00", SEASON_START)
+
+        self.assertEqual(self.gaps(), [])

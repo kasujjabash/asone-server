@@ -29,5 +29,14 @@ router.register("kit-items", views.KitItemViewSet, "kit-item")
 urlpatterns = [
     path("price-lists/", views.PriceListView.as_view(), name="price-list"),
     path("price-lists/gaps/", views.PriceGapView.as_view(), name="price-gaps"),
+    # The kit half of F15/F51. Mounted under price-lists/ rather than kits/
+    # because it is a pricing document, not a catalogue read — the audience
+    # and the permissions follow the price list, not the kit.
+    path("price-lists/kits/", views.KitPriceListView.as_view(), name="kit-price-list"),
+    path(
+        "price-lists/kits/gaps/",
+        views.KitPriceGapView.as_view(),
+        name="kit-price-gaps",
+    ),
     path("", include(router.urls)),
 ]
