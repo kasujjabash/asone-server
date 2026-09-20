@@ -11,3 +11,5 @@ django-cors-headers>=4.3
 # CSV because that is what arrives — and a real reader handles dates,
 # number formats and shared strings that hand-parsing the XML would not.
 openpyxl>=3.1
+django-anymail
+django-anymail

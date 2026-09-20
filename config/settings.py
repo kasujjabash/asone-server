@@ -45,6 +45,7 @@ INSTALLED_APPS = [
     # Provides ExclusionConstraint and the range field types, which catalog
     # uses to make two prices for the same garment on the same day impossible.
     "django.contrib.postgres",
+    "anymail",
     # third party
     "rest_framework",
     "django_filters",
@@ -339,6 +340,15 @@ EMAIL_USE_TLS = os.environ.get("DJANGO_EMAIL_USE_TLS", "True").lower() == "true"
 DEFAULT_FROM_EMAIL = os.environ.get(
     "DJANGO_DEFAULT_FROM_EMAIL", "AsOne Logistics <no-reply@asone.test>"
 )
+
+
+# Brevo's HTTP API, used instead of SMTP when the host blocks outbound port
+# 587 (common on fresh cloud accounts). Set DJANGO_BREVO_API_KEY to switch;
+# leave unset and the SMTP settings above apply unchanged.
+BREVO_API_KEY = os.environ.get("DJANGO_BREVO_API_KEY", "")
+if BREVO_API_KEY:
+    EMAIL_BACKEND = "anymail.backends.sendinblue.EmailBackend"
+    ANYMAIL = {"SENDINBLUE_API_KEY": BREVO_API_KEY}
 
 # How long the sign-in email takes to arrive and be typed in. Long enough for
 # a rural connection and a person finding their phone; short enough that a
