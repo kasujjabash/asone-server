@@ -136,14 +136,14 @@ class AuthenticationTests(APITestCase):
         self.authenticate()
         response = self.client.patch(
             reverse("accounts:me"),
-            {"first_name": "Julius", "last_name": "Okello", "email": "julius@asone.test"},
+            {"first_name": "Julius", "last_name": "Okello", "phone_number": "0772000111"},
             format="json",
         )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.user.refresh_from_db()
         self.assertEqual(self.user.last_name, "Okello")
-        self.assertEqual(self.user.email, "julius@asone.test")
+        self.assertEqual(self.user.phone_number, "0772000111")
 
     def test_me_cannot_be_used_to_change_role_or_site(self):
         """SECURITY: privilege escalation through the self-service endpoint.
@@ -184,15 +184,23 @@ class AuthenticationTests(APITestCase):
         self.user.refresh_from_db()
         self.assertTrue(self.user.check_password(PASSWORD))
 
-    def test_me_rejects_an_email_already_in_use(self):
-        """Email is the login credential, so two accounts cannot share one."""
+    def test_me_cannot_change_its_own_email(self):
+        """The address is the credential, so nobody edits their own.
+
+        A person who mistypes it here locks themselves out of the only system
+        that could have told them: the sign-in code goes to the new address.
+        The field is off the allow-list entirely, so the PATCH succeeds and
+        the address is simply untouched — the same shape as role and site.
+        """
         make_user("taken@asone.test", User.Role.PROGRAM_LEAD)
         self.authenticate()
 
         response = self.client.patch(
             reverse("accounts:me"), {"email": "taken@asone.test"}, format="json"
         )
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.email, "julius@asone.test")
 
     # -- refresh and logout ----------------------------------------------
 

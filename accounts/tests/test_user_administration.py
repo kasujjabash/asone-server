@@ -187,13 +187,12 @@ class UserAdministrationTests(APITestCase):
 
     # -- editing ----------------------------------------------------------
 
-    def test_a_lead_can_edit_name_email_and_role(self):
+    def test_a_lead_can_edit_name_and_role(self):
         response = self.client.patch(
             reverse("accounts:user-detail", args=[self.clerk.pk]),
             {
                 "first_name": "Julius",
                 "last_name": "Okello",
-                "email": "j.okello@asone.test",
                 "role": User.Role.FINANCE,
                 "warehouse": None,
             },
@@ -203,17 +202,28 @@ class UserAdministrationTests(APITestCase):
 
         self.clerk.refresh_from_db()
         self.assertEqual(self.clerk.last_name, "Okello")
-        self.assertEqual(self.clerk.email, "j.okello@asone.test")
         self.assertEqual(self.clerk.role, User.Role.FINANCE)
         self.assertIsNone(self.clerk.warehouse)
 
-    def test_editing_an_email_to_one_already_in_use_is_refused(self):
+    def test_a_lead_cannot_edit_somebody_else_s_email(self):
+        """Not even an administrator. The address is the credential.
+
+        A lead retyping somebody's address is the likeliest way an account
+        goes dark: the person cannot sign in, the sign-in code goes to an
+        address nobody reads, and the only account that could fix it is the
+        one now locked out. `email` is read-only on this serializer, so the
+        PATCH succeeds and leaves the address alone.
+        """
+        original = self.clerk.email
         response = self.client.patch(
             reverse("accounts:user-detail", args=[self.clerk.pk]),
-            {"email": self.lead.email},
+            {"email": "j.okello@asone.test"},
             format="json",
         )
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        self.clerk.refresh_from_db()
+        self.assertEqual(self.clerk.email, original)
 
     # -- resetting --------------------------------------------------------
 

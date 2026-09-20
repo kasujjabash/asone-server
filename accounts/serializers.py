@@ -97,27 +97,18 @@ class MeUpdateSerializer(serializers.ModelSerializer):
     `password` are all absent, so a school clerk cannot PATCH themselves into
     Finance or reassign themselves to another site. Anything added to this
     tuple becomes self-service — add nothing without meaning to.
+
+    `email` is absent too, and for a different reason. It is not a contact
+    detail here, it is the **credential**: the address a person signs in with
+    and the one their sign-in code is sent to. Changing it is one typo away
+    from locking an account out of a system that has no way to mail the
+    correction anywhere the person can still read. AsOne changes an address
+    out of band — see `UserAdminSerializer`, where it is read-only as well.
     """
 
     class Meta:
         model = User
-        fields = ("first_name", "last_name", "email", "phone_number")
-
-    def validate_email(self, value):
-        """Reject an address already in use.
-
-        AbstractUser does not make email unique at the database level, so this
-        is a courtesy check rather than a guarantee — two simultaneous saves
-        could still collide. It is here to give a clear message, not to
-        enforce an invariant.
-        """
-        value = value.strip()
-        if not value:
-            return value
-        clash = User.objects.filter(email__iexact=value).exclude(pk=self.instance.pk)
-        if clash.exists():
-            raise serializers.ValidationError("That email address is already in use.")
-        return value
+        fields = ("first_name", "last_name", "phone_number")
 
 
 # ---------------------------------------------------------------------------
@@ -334,6 +325,12 @@ class UserAdminSerializer(serializers.ModelSerializer):
         # access and password setting are deliberately not API operations.
         read_only_fields = (
             "id",
+            # The credential, not a contact detail. A lead cannot change it
+            # either: this endpoint is reached from a screen, and a screen is
+            # exactly where a mistyped address goes unnoticed until the person
+            # it belongs to can no longer sign in to report it. Deliberately
+            # left with no API at all rather than given a confirmation step.
+            "email",
             "must_change_password",
             "last_login",
             "date_joined",
