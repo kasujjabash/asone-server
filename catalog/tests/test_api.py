@@ -51,7 +51,10 @@ READ_AUDIENCE = {
     # warehouses cannot post one. Widened 14 September 2026 — worth putting to
     # AsOne with open question Q3.
     "catalog:warehouse-list": {Role.WAREHOUSE_STAFF, Role.FINANCE},
-    "catalog:school-list": {Role.WAREHOUSE_STAFF, Role.SCHOOL_STAFF},
+    # Finance for the same shape of reason as warehouses above: F34 gives
+    # them the invoice, and every costed report they read is grouped by
+    # school. Widened 20 September 2026 — belongs with Q3.
+    "catalog:school-list": {Role.WAREHOUSE_STAFF, Role.SCHOOL_STAFF, Role.FINANCE},
     "catalog:kit-list": {Role.SCHOOL_STAFF, Role.FINANCE},
     "catalog:kit-item-list": {Role.SCHOOL_STAFF, Role.FINANCE},
 }

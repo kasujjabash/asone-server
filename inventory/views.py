@@ -181,7 +181,13 @@ class ReorderAlertView(APIView):
     # F50 leaves the Finance cell blank, unlike F47 next door. Reordering is
     # an operational decision, not a financial one.
     permission_classes = [*AUTHENTICATED, MasterDataAccess]
-    read_roles = (Role.WAREHOUSE_STAFF,)
+    # Finance alongside the warehouse, for the same reason they read the
+    # minimum levels these alerts are computed from: the Inventory Report
+    # they open lists "Safety Stock Threshold Breaches", and F23 gives them
+    # the write-offs a breach usually precedes. Without it the report lost a
+    # section to a 403 and said nothing about having lost it.
+    # Widened 20 September 2026 — belongs with Q3.
+    read_roles = (Role.WAREHOUSE_STAFF, Role.FINANCE)
 
     def get(self, request):
         warehouse = _warehouse(request)

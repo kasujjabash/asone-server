@@ -200,7 +200,13 @@ class SchoolViewSet(viewsets.ModelViewSet):
     queryset = School.objects.select_related("primary_warehouse").order_by("name")
     serializer_class = SchoolSerializer
     permission_classes = MASTER_DATA
-    read_roles = (Role.WAREHOUSE_STAFF, Role.SCHOOL_STAFF)
+    # Finance is wider than the matrix's line, and follows from two cells
+    # that are in it: F34 gives them the invoice, and every costed report
+    # they read — shipments, orders on hold, part-processed — is grouped by
+    # school. A role that cannot list schools cannot filter its own reports
+    # by one, which is what the Orders screen was 403ing on.
+    # Widened 20 September 2026 — worth putting to AsOne with Q3.
+    read_roles = (Role.WAREHOUSE_STAFF, Role.SCHOOL_STAFF, Role.FINANCE)
     filterset_fields = ("level", "primary_warehouse", "is_active")
 
     def get_queryset(self):
