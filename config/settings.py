@@ -345,10 +345,15 @@ DEFAULT_FROM_EMAIL = os.environ.get(
 # Brevo's HTTP API, used instead of SMTP when the host blocks outbound port
 # 587 (common on fresh cloud accounts). Set DJANGO_BREVO_API_KEY to switch;
 # leave unset and the SMTP settings above apply unchanged.
+#
+# `brevo`, not `sendinblue`. Anymail renamed both the backend and the setting
+# key when Sendinblue rebranded; the old names still resolve but raise
+# AnymailDeprecationWarning, so they are on their way out. Verified against
+# anymail 15.2 — both names load, only this one is silent.
 BREVO_API_KEY = os.environ.get("DJANGO_BREVO_API_KEY", "")
 if BREVO_API_KEY:
-    EMAIL_BACKEND = "anymail.backends.sendinblue.EmailBackend"
-    ANYMAIL = {"SENDINBLUE_API_KEY": BREVO_API_KEY}
+    EMAIL_BACKEND = "anymail.backends.brevo.EmailBackend"
+    ANYMAIL = {"BREVO_API_KEY": BREVO_API_KEY}
 
 # How long the sign-in email takes to arrive and be typed in. Long enough for
 # a rural connection and a person finding their phone; short enough that a

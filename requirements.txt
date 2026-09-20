@@ -11,5 +11,13 @@ django-cors-headers>=4.3
 # CSV because that is what arrives — and a real reader handles dates,
 # number formats and shared strings that hand-parsing the XML would not.
 openpyxl>=3.1
-django-anymail
-django-anymail
+# Brevo's HTTP API as an email backend. Needed because DigitalOcean blocks
+# outbound SMTP (port 587) on new droplets, and with no working mail nobody
+# can sign in at all — the code is the second factor, not an extra.
+#
+# Pinned, and not only for reproducibility: Anymail renamed this backend from
+# `sendinblue` to `brevo` when Sendinblue rebranded. An unpinned install would
+# one day fetch a version that has dropped the old name, Django would refuse
+# to start on an invalid EMAIL_BACKEND, and the symptom would be "nobody can
+# log in" rather than anything pointing at pip.
+django-anymail>=10.0
