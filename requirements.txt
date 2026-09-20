@@ -21,3 +21,4 @@ openpyxl>=3.1
 # to start on an invalid EMAIL_BACKEND, and the symptom would be "nobody can
 # log in" rather than anything pointing at pip.
 django-anymail>=10.0
+whitenoise
