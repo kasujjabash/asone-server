@@ -123,9 +123,33 @@ class LoginView(TokenObtainPairView):
 
     def post(self, request, *args, **kwargs):
         email = request.data.get("email") if hasattr(request, "data") else None
+        password = request.data.get("password") if hasattr(request, "data") else None
 
-        # Deliberately first. A person who was never added is told so,
-        # rather than being sent round the password loop forever.
+        # Before the access check, not after.
+        #
+        # `user_with_access()` below answers "no account here" for anything it
+        # cannot match — including a **blank** address, which is not an access
+        # decision at all. Submitting the form empty therefore answered 403
+        # "You do not have access to this system. Ask AsOne Central Office to
+        # create an account for you." to somebody who had simply not typed
+        # anything yet: alarming, and untrue.
+        #
+        # It also wrote a failed login attempt against a null address on every
+        # empty submit, filling the audit trail with noise that looks like
+        # somebody probing the system.
+        #
+        # A missing field is a malformed request: 400, naming the field, the
+        # same as every other endpoint in this API.
+        missing = {}
+        if not (email or "").strip():
+            missing["email"] = ["Enter your email address."]
+        if not (password or "").strip():
+            missing["password"] = ["Enter your password."]
+        if missing:
+            raise DRFValidationError(missing)
+
+        # Deliberately before the password check. A person who was never added
+        # is told so, rather than being sent round the password loop forever.
         try:
             user = services.user_with_access(email)
         except services.NoAccess as exc:
