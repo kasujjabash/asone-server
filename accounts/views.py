@@ -90,6 +90,10 @@ def _mask_email(email):
         "Check an email address and password, then **email a one-time code**. "
         "No tokens are returned here — post the code to "
         "`/api/auth/login/verify/` to finish.\n\n"
+        "**An unconfirmed address is not refused here.** On a first sign-in "
+        "the emailed code confirms the address as well as being the second "
+        "factor, and the response carries `confirming_email: true` so the "
+        "screen can say so. There is no separate step to do first.\n\n"
         "**403 means the address is not a user of this system**, or has been "
         "deactivated. Only people Central Office has added can sign in, and "
         "this says so plainly rather than leaving somebody retyping a "
@@ -169,13 +173,34 @@ class LoginView(TokenObtainPairView):
             )
             raise
 
-        # The password was right. Before anything else, the address it was
-        # sent to has to have been proven — otherwise a mistyped address
-        # still makes a working account for whoever holds the password.
-        try:
-            services.require_verified_email(user)
-        except services.EmailNotVerified as exc:
-            raise PermissionDenied(str(exc)) from exc
+        # An unconfirmed address is **not** refused here, and used to be.
+        #
+        # A lead creates the account, reads the generated password off the
+        # screen and passes it on by hand. The person then typed it, got
+        # "Your email address has not been confirmed yet", and stopped —
+        # there was nothing on that screen to do next, and the code they
+        # were told to look for had been sent days earlier to an inbox they
+        # had often never been told to check.
+        #
+        # The check was also buying nothing. The very next line emails a
+        # one-time code to that same address and no token is issued until it
+        # comes back, so receiving mail at the address is already required
+        # to get in. A mistyped address still cannot become a working
+        # account — it fails at the code instead of before it, and this way
+        # confirming the address is something the person is walked through
+        # rather than something they are blocked by.
+        #
+        # This is the same reasoning that retired the registration code on
+        # 15 September 2026 — see services.request_registration.
+        #
+        # Entering the code stamps `email_verified_at` if it is still null;
+        # see services.verify_login_code.
+
+        # Read before the challenge is issued. Entering the code is what
+        # flips it, so asking afterwards would always say "already
+        # confirmed" and the first-timer would never see the wording meant
+        # for them.
+        confirming_email = not user.email_is_verified
 
         # Still not a sign-in — it is half of one, and nothing here issues a
         # token.
@@ -185,16 +210,23 @@ class LoginView(TokenObtainPairView):
             email=email, user=user, succeeded=True, request=request
         )
 
+        minutes = settings.LOGIN_CODE_TTL_MINUTES
+        detail = (
+            "We have emailed you a code to confirm your address. Enter it "
+            f"to finish setting up your account. It expires in {minutes} "
+            "minutes."
+            if confirming_email
+            else f"We have emailed you a sign-in code. It expires in {minutes} minutes."
+        )
+
         return Response(
             LoginChallengeIssuedSerializer(
                 {
                     "challenge": challenge.id,
                     "expires_at": challenge.expires_at,
                     "email_hint": _mask_email(user.email),
-                    "detail": (
-                        "We have emailed you a sign-in code. It expires in "
-                        f"{settings.LOGIN_CODE_TTL_MINUTES} minutes."
-                    ),
+                    "confirming_email": confirming_email,
+                    "detail": detail,
                 }
             ).data
         )
@@ -244,19 +276,24 @@ class VerifyLoginCodeView(APIView):
 
 @extend_schema(
     tags=["Authentication"],
-    summary="Confirm your email address",
+    summary="Confirm an email address without signing in",
     request=EmailVerificationSerializer,
     responses={200: OpenApiResponse(description="The address is confirmed.")},
     description=(
-        "A new member of staff confirms the address their account was "
-        "created against, using the code emailed to it.\n\n"
-        "**Until this is done, signing in is refused.** An account is created "
-        "with a password the lead knows and an address nobody has proven; "
-        "this is what proves it. A mistyped address must not become a working "
-        "account.\n\n"
+        "Confirms an account's email address using a standalone code, "
+        "without signing in.\n\n"
+        "**Not part of the normal flow, and not a gate in front of it.** "
+        "Signing in is *not* refused while an address is unconfirmed: the "
+        "code emailed by `POST /api/auth/login/` confirms it on the way "
+        "through, which is how almost everybody's address gets confirmed. "
+        "Nothing sends a code to this endpoint unless a lead calls "
+        "`POST /api/auth/users/{id}/resend-verification/` first.\n\n"
+        "Kept for the case that flow cannot serve — a sign-in code that will "
+        "not reach the person, or a mailbox being checked on their behalf. "
+        "This code lasts days rather than minutes so it survives being "
+        "passed along.\n\n"
         "The password is not part of this step and is never emailed — it "
-        "reaches the person through their lead, by a different route. That "
-        "separation is the whole point of the code.\n\n"
+        "reaches the person through their lead, by a different route.\n\n"
         "Wrong codes count against a limit, and the code expires."
     ),
 )
@@ -282,9 +319,9 @@ class EmailVerificationView(APIView):
         return Response(
             {
                 "detail": (
-                    "Your email address is confirmed. You can now sign in with "
-                    "the password your lead gave you, and you will be asked to "
-                    "replace it."
+                    "Your email address is confirmed. Sign in with the "
+                    "password your lead gave you, and you will be asked to "
+                    "choose one of your own."
                 )
             }
         )
@@ -511,14 +548,16 @@ class UserViewSet(viewsets.ModelViewSet):
         ),
     )
     def create(self, request, *args, **kwargs):
-        """Add a member of staff, and email them a confirmation code.
+        """Add a member of staff, and tell them the account exists.
 
         The password is generated unless the lead types one, and shown back
-        **once** so they can pass it on themselves. It is never emailed. The
-        confirmation code is, and keeping the two on separate routes is what
-        makes holding both mean something.
+        **once** so they can pass it on themselves. It is never emailed.
 
-        The account cannot be signed into until that code is entered.
+        No confirmation code goes out here any more. The account can be
+        signed into straight away with the password the lead passes on, and
+        that sign-in emails a code of its own which confirms the address on
+        the way through. Sending one now as well would put two codes with
+        two different lifetimes in front of somebody on their first day.
         """
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -539,17 +578,21 @@ class UserViewSet(viewsets.ModelViewSet):
                 user, password = services.create_staff_user(
                     password=typed_password, **fields
                 )
-                services.send_email_verification(
-                    user, sent_by=request.user, request=request
-                )
+                services.send_account_created_email(user, sent_by=request.user)
         except OSError as exc:
             # Anything the mail library raises for "could not send" —
             # unreachable host, refused credentials, timeout. The account has
             # been rolled back, so the lead can simply try again.
+            #
+            # Still worth failing on now that no code is in this message: an
+            # address that cannot be reached cannot receive a sign-in code
+            # either, so the account would be unusable. Better caught while
+            # the lead is still looking at the form they mistyped.
             raise ServiceUnavailable(
-                "The account was not created because the confirmation email "
-                "could not be sent. Nothing has been saved — try again, and "
-                "tell whoever runs the system if it keeps happening."
+                "The account was not created because we could not email that "
+                "address. Check it is spelt correctly. Nothing has been "
+                "saved — try again, and tell whoever runs the system if it "
+                "keeps happening."
             ) from exc
 
         return Response(
@@ -558,10 +601,10 @@ class UserViewSet(viewsets.ModelViewSet):
                 "password": password,
                 "detail": (
                     f"Give this password to {user.get_full_name() or user.email} "
-                    "yourself — it is not emailed, and cannot be shown again. A "
-                    f"confirmation code has been emailed to {user.email}; they "
-                    "must enter it before they can sign in, and they will be "
-                    "asked to replace this password once they do."
+                    "yourself — it is not emailed, and cannot be shown again. "
+                    "When they sign in with it, a code is emailed to "
+                    f"{user.email} to confirm the address, and they are then "
+                    "asked to choose a password of their own."
                 ),
             },
             status=status.HTTP_201_CREATED,
@@ -572,10 +615,14 @@ class UserViewSet(viewsets.ModelViewSet):
         request=None,
         responses={200: OpenApiResponse(description="A fresh code was emailed.")},
         description=(
-            "Emails a **new** confirmation code and retires the old one.\n\n"
-            "Needed more often than it sounds: a code lasts seven days, mail "
-            "goes astray, and people start a new job a fortnight after being "
-            "added. Without this the only fix is a developer.\n\n"
+            "Emails a standalone confirmation code and retires any earlier "
+            "one.\n\n"
+            "**Rarely needed.** An address is normally confirmed by the code "
+            "the person's first sign-in emails them, with no help from a "
+            "lead. This is for when that cannot work — the sign-in code is "
+            "not arriving, or somebody is checking the mailbox on their "
+            "behalf. It lasts seven days rather than ten minutes, so it "
+            "survives being passed along.\n\n"
             "Refused for somebody whose address is already confirmed — there "
             "is nothing left to prove. If they cannot get in, use **set "
             "password** instead."
@@ -860,9 +907,10 @@ class RegistrationRequestViewSet(viewsets.ReadOnlyModelViewSet):
             raise self._conflict(exc) from exc
         except OSError as exc:
             raise ServiceUnavailable(
-                "The account was not created because the confirmation email "
-                "could not be sent. Nothing has been saved — try again, and "
-                "tell whoever runs the system if it keeps happening."
+                "The account was not created because we could not email that "
+                "address. Check it is spelt correctly. Nothing has been "
+                "saved — the request is still pending, so you can approve it "
+                "again once the address is right."
             ) from exc
 
         return Response(
@@ -871,10 +919,10 @@ class RegistrationRequestViewSet(viewsets.ReadOnlyModelViewSet):
                 "password": password,
                 "detail": (
                     f"Give this password to {user.get_full_name() or user.email} "
-                    "yourself — it is not emailed, and cannot be shown again. A "
-                    f"confirmation code has been emailed to {user.email}; they "
-                    "must enter it before they can sign in, and they will be "
-                    "asked to replace this password once they do."
+                    "yourself — it is not emailed, and cannot be shown again. "
+                    "When they sign in with it, a code is emailed to "
+                    f"{user.email} to confirm the address, and they are then "
+                    "asked to choose a password of their own."
                 ),
             },
             status=status.HTTP_201_CREATED,

@@ -429,22 +429,23 @@ def approve_registration(request, *, role, warehouse=None, school=None, decided_
         school=school,
     )
 
-    # Approving **is** the confirmation.
+    # Approval used to stamp the address confirmed here, without anybody
+    # having proved anything about it. That was a workaround, not a
+    # decision: sign-in refused an unconfirmed address outright, so an
+    # approved person was told their address "has not been confirmed yet"
+    # by a system that had just approved them. Stamping it was the only way
+    # to let them in.
     #
-    # Two things used to sit here and both have gone. The first was a guard
-    # refusing to approve a request whose address nobody had verified —
-    # which, once the registration code was removed, meant no request could
-    # ever be approved. The second emailed the new account a verification
-    # code, leaving `email_verified_at` null until they typed it, so the
-    # person a lead had just approved was told at sign-in that their address
-    # "has not been confirmed yet".
+    # Sign-in no longer refuses them, and the code it emails confirms the
+    # address for real, so the workaround has gone with the thing it was
+    # working around. `email_verified_at` now means what it says.
     #
-    # A lead looked at this person and decided they get an account. Their
-    # credentials are emailed to that address by `create_staff_user`, so an
-    # address nobody holds fails there — before anyone can sign in with it.
-    # A second code proves nothing the first email does not.
-    user.email_verified_at = timezone.now()
-    user.save(update_fields=["email_verified_at"])
+    # The comment that stood here claimed `create_staff_user` emails the
+    # new account its credentials. It does not and never did — it sends
+    # nothing at all, which is why approval is the one path that used to
+    # leave somebody with an account and no word of it. Hence the email
+    # below.
+    send_account_created_email(user, sent_by=decided_by)
 
     request.status = request.Status.APPROVED
     request.decided_at = timezone.now()
@@ -768,18 +769,41 @@ def send_login_code(user, code):
     Failures are not swallowed. If the mail cannot be sent the sign-in must
     fail loudly — a caller told "check your email" for a message that was
     never sent has no way to tell that from a slow one, and will sit waiting.
+
+    The wording differs on a first sign-in. The code does two jobs there —
+    second factor and confirmation of the address — and somebody who has
+    just been handed a password by their lead is not expecting a security
+    step, so saying what it is for is the difference between typing it and
+    wondering whether the email is genuine.
     """
     minutes = settings.LOGIN_CODE_TTL_MINUTES
-    send_mail(
-        subject=f"Your AsOne sign-in code: {code}",
-        message=(
-            f"Hello {user.get_full_name() or user.email},\n\n"
+    first_time = not user.email_is_verified
+
+    if first_time:
+        subject = f"Confirm your AsOne account: {code}"
+        opening = (
+            "Welcome to AsOne Logistics. To finish setting up your account "
+            "we need to confirm this is your email address.\n\n"
+            f"Your confirmation code is {code}\n\n"
+            f"It expires in {minutes} minutes and can be used once. Enter "
+            "it on the sign-in page, and you will then be asked to choose a "
+            "password only you know.\n\n"
+            "If you were not expecting this, someone else may have your "
+            "password. Tell AsOne Central Office.\n"
+        )
+    else:
+        subject = f"Your AsOne sign-in code: {code}"
+        opening = (
             f"Your sign-in code is {code}\n\n"
             f"It expires in {minutes} minutes and can be used once.\n\n"
             "If you did not try to sign in, someone else may know your "
             "password. Tell AsOne Central Office, and change it as soon as "
             "you can.\n"
-        ),
+        )
+
+    send_mail(
+        subject=subject,
+        message=f"Hello {user.get_full_name() or user.email},\n\n{opening}",
         from_email=settings.DEFAULT_FROM_EMAIL,
         recipient_list=[user.email],
         fail_silently=False,
@@ -848,6 +872,15 @@ def verify_login_code(challenge_id, code):
             challenge.consumed_at = timezone.now()
             challenge.save(update_fields=["consumed_at"])
 
+            # Entering a code that was emailed to this address **is** proof
+            # of holding it — the same proof `verify_email` accepts, by the
+            # same route. So a first sign-in confirms the address on the way
+            # through rather than being blocked until somebody confirms it
+            # separately. Only ever set, never cleared.
+            if challenge.user.email_verified_at is None:
+                challenge.user.email_verified_at = timezone.now()
+                challenge.user.save(update_fields=["email_verified_at"])
+
     if refusal:
         raise ChallengeUnusable(refusal)
 
@@ -855,8 +888,60 @@ def verify_login_code(challenge_id, code):
 
 
 # ---------------------------------------------------------------------------
-# Email verification — proving a new account's address
+# Telling a new member of staff their account exists
 # ---------------------------------------------------------------------------
+
+
+def send_account_created_email(user, *, sent_by=None):
+    """Tell somebody an account has been made for them, and what happens next.
+
+    **No code in this message.** There used to be one, and it had to be
+    entered before the account could be signed into at all — which meant a
+    person holding the password their lead had just given them was turned
+    away at the door by a code sent days earlier to an inbox nobody had told
+    them to check. The confirmation now happens inside the first sign-in,
+    where the person already is: see `send_login_code`.
+
+    **No password either**, and that has not changed. It is shown to the
+    lead once, on screen, and passed on by hand. Putting it in this mailbox
+    would mean one intercepted inbox is the whole account.
+
+    Failures are not swallowed, and the caller creates the account in the
+    same transaction. That is deliberate: it is the one point where a
+    mistyped address is caught while it can still be corrected cheaply,
+    rather than a fortnight later when somebody cannot sign in.
+    """
+    who = sent_by.get_full_name() if sent_by else "AsOne Central Office"
+
+    send_mail(
+        subject="Your AsOne Logistics account",
+        message=(
+            f"Hello {user.get_full_name() or user.email},\n\n"
+            f"{who} has created an account for you on AsOne Logistics, as "
+            f"{user.get_role_display()}.\n\n"
+            "Your password is not in this email — ask your lead for it, or "
+            "wait for them to pass it on.\n\n"
+            "When you have it, sign in at this address. We will email you a "
+            "code to confirm this mailbox is yours, and once you have "
+            "entered it you will be asked to choose a password only you "
+            "know.\n\n"
+            "If you were not expecting this, you can ignore it.\n"
+        ),
+        from_email=settings.DEFAULT_FROM_EMAIL,
+        recipient_list=[user.email],
+        fail_silently=False,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Email verification — confirming an address without signing in
+# ---------------------------------------------------------------------------
+# Not the default path any more. A first sign-in confirms the address on its
+# way through (`verify_login_code`), which is where almost everybody does it.
+# What is left here is the manual route: a lead can push a standalone code to
+# somebody whose address needs confirming without one. Kept because removing
+# it would take `POST /api/auth/verify-email/` with it, and a confirmation
+# the lead can drive is worth having when a sign-in is going wrong.
 
 
 class VerificationUnusable(Exception):
@@ -874,17 +959,16 @@ STALE_CODE = (
 )
 
 
-def send_email_verification(user, *, sent_by=None, request=None, password=None):
+def send_email_verification(user, *, sent_by=None, request=None):
     """Email a code proving this address belongs to this person.
 
     Any earlier unused code is retired first, so re-sending does not leave
     two working codes.
 
-    ``password`` exists for the email body's fallback wording and should not
-    be passed a real value by anything new — the password is shown to the
-    lead once, on screen, and never emailed or shown to the account's owner.
-    Proving the address and holding the password are two separate facts,
-    and putting both in one inbox would make this step prove nothing.
+    A ``password`` argument used to be threaded through here to put the
+    password in this email as a fallback. It was never passed a real value
+    and has gone: the password reaches the person through their lead, and
+    one mailbox holding both halves would make the code prove nothing.
     """
     EmailVerification.objects.filter(user=user, consumed_at__isnull=True).update(
         consumed_at=timezone.now()
@@ -899,49 +983,39 @@ def send_email_verification(user, *, sent_by=None, request=None, password=None):
         ip_address=_client_ip(request) if request else None,
     )
 
-    send_verification_email(user, code, sent_by=sent_by, password=password)
+    send_verification_email(user, code, sent_by=sent_by)
     return verification
 
 
-def send_verification_email(user, code, *, sent_by=None, password=None):
-    """Tell somebody they have an account and how to confirm the address.
+def send_verification_email(user, code, *, sent_by=None):
+    """Send a standalone confirmation code, on a lead's instruction.
 
-    Failures are not swallowed. If this cannot be sent, creating the account
-    must fail loudly — an account whose address was never confirmed cannot
-    be signed into, so reporting success would be a lie.
+    Failures are not swallowed: a lead told the code went out, for a message
+    that never did, will wait for a call that is not coming.
 
-    ``password`` should not be passed a real value — see
-    `send_email_verification`.
+    This message no longer says the account cannot be used until the code is
+    entered, because that stopped being true. The person can sign in now and
+    confirm the address on the way through. This code is the alternative for
+    somebody who cannot — a sign-in code that will not arrive, a mailbox
+    being checked on somebody else's behalf — and it lasts days rather than
+    minutes so it survives being passed along.
     """
     days = settings.INVITATION_TTL_DAYS
     who = sent_by.get_full_name() if sent_by else "AsOne Central Office"
 
-    if password:
-        password_paragraph = (
-            f"Your password is {password}\n\n"
-            "You will be asked to replace it with one only you know the "
-            "first time you sign in.\n\n"
-        )
-    else:
-        password_paragraph = (
-            "Your password is not in this email. It reaches you through "
-            "your lead, by a different route.\n\n"
-        )
-
     send_mail(
-        subject="Confirm your AsOne Logistics account",
+        subject="Confirm your AsOne Logistics email address",
         message=(
             f"Hello {user.get_full_name() or user.email},\n\n"
-            f"{who} has created an account for you on AsOne Logistics, as "
-            f"{user.get_role_display()}.\n\n"
+            f"{who} has asked us to confirm that this is your email address "
+            f"for AsOne Logistics, where you are {user.get_role_display()}.\n\n"
             f"Your confirmation code is {code}\n\n"
-            "Enter it on the sign-in page to confirm this address, then "
-            "sign in with the password below.\n\n"
-            f"{password_paragraph}"
+            "Enter it on the sign-in page. Your password is not in this "
+            "email — it reaches you through your lead, by a different "
+            "route.\n\n"
             f"The code expires in {days} days. If it runs out, ask your lead "
             "to send another.\n\n"
-            "If you were not expecting this, you can ignore it — the account "
-            "cannot be used until this code is entered.\n"
+            "If you were not expecting this, you can ignore it.\n"
         ),
         from_email=settings.DEFAULT_FROM_EMAIL,
         recipient_list=[user.email],
@@ -999,26 +1073,8 @@ def verify_email(email, code):
     return user
 
 
-class EmailNotVerified(Exception):
-    """The account exists and the password is right, but the address was
-    never confirmed.
-
-    Raised **after** the password is checked, not before. Checking first
-    would tell anybody who typed an address whether it had an unverified
-    account, which is more than the closed-door message already gives away.
-    """
-
-
-def require_verified_email(user):
-    """Refuse a sign-in for an address nobody has confirmed.
-
-    An account is created with a password the lead knows and an address
-    nobody has proven. The code is what proves it, and until it is entered
-    the account is not a way in — otherwise a mistyped address would still
-    make a working account, reachable by whoever holds the password.
-    """
-    if not user.email_is_verified:
-        raise EmailNotVerified(
-            "Your email address has not been confirmed yet. Check your inbox "
-            "for the confirmation code and enter it before signing in."
-        )
+# `require_verified_email` lived here and refused a sign-in whose address
+# nobody had confirmed. Removed: the sign-in code that follows it is emailed
+# to that same address and no token is issued until it comes back, so it
+# already proves what this was checking — and checking first turned the
+# first sign-in into a dead end. See accounts/views.py::LoginView.

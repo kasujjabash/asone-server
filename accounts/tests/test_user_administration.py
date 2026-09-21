@@ -73,7 +73,7 @@ class UserAdministrationTests(APITestCase):
         self.assertTrue(joan.check_password("her-first-passphrase"))
 
     def confirm_address(self, email="joan@asone.test"):
-        """New accounts must confirm the emailed code before signing in.
+        """Mark the address proven without going through a sign-in.
 
         Done directly rather than over HTTP — these tests are about user
         administration, and the confirmation flow has its own file.
@@ -94,9 +94,13 @@ class UserAdministrationTests(APITestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
 
-    def test_they_cannot_sign_in_until_the_address_is_confirmed(self):
-        """The password alone is not enough — the address it was created
-        against has to be proven first."""
+    def test_an_unconfirmed_address_does_not_block_the_password_step(self):
+        """It used to, and that was the dead end: the person had the
+        password their lead had just handed them and could get no further.
+
+        The address is still proven before any token is issued — the code
+        emailed by this step does it. See test_email_verification.py.
+        """
         self.create()
         self.client.force_authenticate(None)
 
@@ -105,7 +109,9 @@ class UserAdministrationTests(APITestCase):
             {"email": "joan@asone.test", "password": "her-first-passphrase"},
             format="json",
         )
-        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("challenge", response.data)
+        self.assertNotIn("access", response.data)
 
     def test_the_lead_chosen_password_must_pass_django_validators(self):
         """A lead must not be able to set "1234" for a colleague."""

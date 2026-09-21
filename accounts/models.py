@@ -51,14 +51,6 @@ class User(AbstractUser):
 
     role = models.CharField(max_length=32, choices=Role.choices)
 
-    # Set when an administrator creates the account or resets its password.
-    # Until the person chooses their own password, the administrator knows it,
-    # which is exactly the shared-password situation AsOne asked us to prevent
-    # (p.9: "There can be no sharing of Passwords"). Enforced by
-    # accounts.permissions.PasswordChangeNotPending.
-    #: Set when the person has entered the code emailed to this address.
-    #: Null means the address is unproven and sign-in is refused — a
-    #: mistyped address must not become a working account.
     #: Bumped every time this account signs in. The number is copied into the
     #: token, and `SingleSessionJWTAuthentication` refuses any token carrying
     #: an older one — which is what makes "one account, one session" take
@@ -66,8 +58,22 @@ class User(AbstractUser):
     #: expire. See accounts/authentication.py.
     session_epoch = models.PositiveIntegerField(default=0)
 
+    #: Set when the person has entered a code emailed to this address —
+    #: normally the one their first sign-in sends them, which confirms the
+    #: address on the way through (`services.verify_login_code`).
+    #:
+    #: Null does **not** block sign-in, and used to. The code that follows
+    #: the password step goes to this address and no token is issued until
+    #: it comes back, so the address is proven either way; refusing first
+    #: only meant the person could never reach the step that would have
+    #: proven it. Records what happened rather than gating it.
     email_verified_at = models.DateTimeField(null=True, blank=True)
 
+    #: Set when an administrator creates the account or resets its password.
+    #: Until the person chooses their own password, the administrator knows
+    #: it, which is exactly the shared-password situation AsOne asked us to
+    #: prevent (p.9: "There can be no sharing of Passwords"). Enforced by
+    #: accounts.permissions.PasswordChangeNotPending.
     must_change_password = models.BooleanField(
         default=False,
         help_text="Blocks everything except viewing your own account and setting a new password.",
@@ -297,22 +303,34 @@ class LoginChallenge(OneTimeCode):
 
 
 class EmailVerification(OneTimeCode):
-    """The code that proves a new member of staff holds the mailbox.
+    """A standalone code confirming somebody holds the mailbox on their
+    account — the manual route, not the usual one.
 
-    ## Why this exists alongside the password
+    ## Why this is no longer the normal path
 
-    A lead creates the account and the system generates a password, which the
-    lead reads once and passes on — by WhatsApp, or in person. That proves
-    nothing about the email address on the account: it could be mistyped, or
-    belong to somebody who left.
+    A first sign-in confirms the address by itself: the code emailed by the
+    password step goes to that address, and entering it stamps
+    `User.email_verified_at` as well as issuing tokens. Almost nobody needs
+    a row in this table.
 
-    The code is emailed and travels by a different route from the password.
-    Holding both is what says "this is the right person, at the right
-    address". Emailing the password too would collapse the two routes into
-    one and make this step decoration.
+    It used to be the only route, sent the moment a lead created the
+    account, with sign-in refused until it was entered. That made the first
+    sign-in a dead end for the person holding a password their lead had just
+    handed them, and it was guarding something the sign-in code already
+    guards. Changed 21 September 2026.
 
-    Until it is used, `User.email_verified_at` is null and sign-in is
-    refused — an account with an unverified address is not a way in.
+    ## What it is still for
+
+    Somebody the sign-in code cannot reach — mail that will not arrive to
+    them in ten minutes, or a mailbox being checked on their behalf. A lead
+    sends one explicitly (`POST /api/auth/users/{id}/resend-verification/`)
+    and it lasts `INVITATION_TTL_DAYS`, not minutes, so it survives being
+    passed along.
+
+    The password is never in this email, for the same reason it is never in
+    any of them: it reaches the person through their lead, by a different
+    route, and one inbox holding both halves would make the code prove
+    nothing.
     """
 
     user = models.ForeignKey(

@@ -166,6 +166,15 @@ class LoginChallengeIssuedSerializer(serializers.Serializer):
     email_hint = serializers.CharField(
         help_text='Where the code went, partly masked — "j••••s@asone.test".'
     )
+    confirming_email = serializers.BooleanField(
+        help_text=(
+            "True on a first sign-in, where entering the code also confirms "
+            "the address. Label the screen accordingly: somebody who has "
+            "just been handed a password by their lead is not expecting a "
+            "security step and needs telling what the code is for. The "
+            "request itself is identical either way."
+        )
+    )
 
 
 class VerifyLoginCodeSerializer(serializers.Serializer):
