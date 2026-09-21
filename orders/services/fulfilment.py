@@ -104,9 +104,8 @@ def pick_order(order, *, picked_by):
 
     Refused if the order is cancelled or already picked/shipped.
 
-    Whether it is also refused for an order nobody has paid for is
-    `REQUIRE_RELEASE_BEFORE_PICK` above — see that comment. It is off, which
-    is the behaviour this function has always had.
+    Also refused for an order nobody has paid for — see
+    `REQUIRE_RELEASE_BEFORE_PICK` above, which is on.
 
     Refused, atomically, if any line is short — see OrderNotFillable and
     check_availability().
